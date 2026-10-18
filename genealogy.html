@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hex CA Genealogy Explorer</title>
+<style>
+:root{color-scheme:dark;--bg:#10131a;--panel:#191e29;--line:#30394a;--text:#edf1f7;--muted:#aab5c6;--accent:#76d6c4}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}
+main{max-width:1200px;margin:auto;padding:28px 20px 60px}h1,h2{line-height:1.2}h1{margin:0 0 8px;font-size:clamp(1.7rem,4vw,2.5rem)}h2{font-size:1.15rem;margin:0 0 14px}p{color:var(--muted)}.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;margin:18px 0}
+.controls{display:flex;gap:12px;flex-wrap:wrap;align-items:center}.controls input,.controls select,.controls button{font:inherit;border-radius:8px;border:1px solid var(--line);padding:10px 12px;background:#111722;color:var(--text)}button{cursor:pointer}button:hover{border-color:var(--accent)}.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}.metric{background:#111722;border:1px solid var(--line);border-radius:10px;padding:12px}.metric strong{display:block;font-size:1.5rem}.metric span{font-size:.85rem;color:var(--muted)}
+.tablewrap{overflow:auto;max-height:440px}table{border-collapse:collapse;width:100%;font-size:.9rem}th,td{text-align:left;border-bottom:1px solid var(--line);padding:9px 10px;white-space:nowrap}th{position:sticky;top:0;background:var(--panel);color:var(--muted)}tbody tr{cursor:pointer}tbody tr:hover{background:#222b38}.hint{font-size:.9rem;color:var(--muted)}canvas{display:block;width:100%;height:440px;background:#10151f;border:1px solid var(--line);border-radius:8px}.legend{display:flex;gap:15px;flex-wrap:wrap;font-size:.85rem;color:var(--muted)}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px}.status{color:var(--accent);min-height:1.5em}.small{font-size:.85rem;color:var(--muted)}
+</style>
+</head>
+<body><main>
+<h1>Hex CA Genealogy Explorer</h1>
+<p>Load a family tree JSON export from the simulation to inspect founder lineages, descendant survival, and parent to offspring relationships. The file is processed locally in this browser.</p>
+<section class="panel">
+<div class="controls"><label for="file">Genealogy JSON</label><input id="file" type="file" accept=".json,application/json"><label for="founder">Founder lineage</label><select id="founder" disabled><option>Load a JSON file first</option></select><button id="download" disabled>Download lineage summary CSV</button></div>
+<div id="status" class="status" role="status"></div>
+<p class="small">Use the export from one simulation run at a time. Organism and founder IDs are local to that run and should not be compared as identities across runs.</p>
+</section>
+<section class="panel"><h2>Run overview</h2><div id="metrics" class="metrics"><div class="metric"><strong>—</strong><span>Load a genealogy file</span></div></div></section>
+<section class="panel"><h2>Founder lineages</h2><p class="hint">Select a row to inspect that founder's descendants. “Descendants” excludes the founder itself. “Maximum generation” is the deepest parent chain recorded.</p><div class="tablewrap"><table><thead><tr><th>Founder ID</th><th>Members</th><th>Descendants</th><th>Alive</th><th>Dead</th><th>Max generation</th><th>First birth tick</th><th>Last birth tick</th><th>Status</th></tr></thead><tbody id="lineages"><tr><td colspan="9">Load a genealogy JSON file to begin.</td></tr></tbody></table></div></section>
+<section class="panel"><h2 id="treeTitle">Family tree</h2><div class="legend"><span><i class="dot" style="background:#76d6c4"></i>Alive at export</span><span><i class="dot" style="background:#7b8495"></i>Died before export</span><span>Each connector links a parent to its offspring.</span></div><canvas id="tree" width="1100" height="440" aria-label="Family tree for selected founder"></canvas><p id="treeInfo" class="hint">Choose a founder lineage to display its tree. Vertical position represents generation, not simulation time.</p></section>
+<section class="panel"><h2>How to interpret this</h2><ul><li><b>Members</b> includes the founder and all recorded descendants.</li><li><b>Alive</b> is the number alive at the moment the JSON was exported.</li><li><b>Extinct</b> means no members of that founder lineage were alive at export. It does not mean the founder failed to reproduce.</li><li><b>Generation depth</b> is based on parent links. A generation is one parent to child step.</li><li>This is ancestry evidence. To test phase transitions, later combine these measures with time series, genome composition, and population behavior.</li></ul></section>
+</main>
+<script>
+(() => {
+const $ = id => document.getElementById(id);
+let data = null, summaries = [], selectedFounder = null;
+const fmt = n => Number(n).toLocaleString();
+function setStatus(s){$('status').textContent=s;}
+function escapeText(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function loadData(json){
+ if(!json || !Array.isArray(json.organisms)) throw new Error('This file does not contain an organisms array. Please select a genealogy JSON export.');
+ const map=new Map();
+ for(const o of json.organisms){
+   if(!Number.isInteger(o.id)||map.has(o.id)) throw new Error('Organism IDs are missing, invalid, or duplicated.');
+   map.set(o.id,{...o,children:[],generation:0});
+ }
+ const founders=[];
+ for(const o of map.values()){
+   if(o.parentId===-1){founders.push(o);continue;}
+   const p=map.get(o.parentId);
+   if(!p) throw new Error('Missing parent record for organism '+o.id+'. Export the full genealogy from the simulation.');
+   p.children.push(o.id);
+ }
+ // IDs are assigned monotonically, so parents precede offspring. Compute generations without recursion.
+ const ordered=[...map.values()].sort((a,b)=>a.id-b.id);
+ for(const o of ordered) if(o.parentId!==-1) o.generation=map.get(o.parentId).generation+1;
+ const byFounder=new Map();
+ for(const o of ordered){
+   const fid=o.founderId;
+   if(!byFounder.has(fid)) byFounder.set(fid,[]);
+   byFounder.get(fid).push(o);
+ }
+ summaries=[...byFounder.entries()].map(([founderId,members])=>{
+   const root=map.get(founderId);
+   const alive=members.filter(o=>o.deathTick===null||o.deathTick===undefined).length;
+   const gens=members.map(o=>o.generation);
+   const births=members.map(o=>Number(o.birthTick)||0);
+   return {founderId,members:members.length,descendants:members.length-1,alive,dead:members.length-alive,maxGeneration:Math.max(0,...gens),firstBirth:Math.min(...births),lastBirth:Math.max(...births),status:alive?'Surviving':'Extinct',root:root||members.find(o=>o.parentId===-1),organisms:members};
+ }).sort((a,b)=>b.members-a.members);
+ data={...json,map,ordered,founders,byFounder};
+ selectedFounder=summaries.length?summaries[0].founderId:null;
+ renderOverview();renderLineages();fillSelect();renderTree();
+ $('download').disabled=false;
+ setStatus('Loaded '+fmt(ordered.length)+' organism records from tick '+fmt(json.exportedAtTick ?? 0)+'.');
+}
+function renderOverview(){
+ const all=data.ordered, alive=all.filter(o=>o.deathTick===null||o.deathTick===undefined).length;
+ const maxGen=Math.max(0,...all.map(o=>o.generation));
+ const extinct=summaries.filter(s=>s.alive===0).length;
+ const births=all.filter(o=>o.parentId!==-1).length;
+ const items=[['Organisms recorded',all.length],['Alive at export',alive],['Died before export',all.length-alive],['Founder lineages',summaries.length],['Extinct lineages',extinct],['Offspring births recorded',births],['Deepest generation',maxGen],['Exported at tick',data.exportedAtTick??'—']];
+ $('metrics').innerHTML=items.map(([label,val])=>'<div class="metric"><strong>'+fmt(val)+'</strong><span>'+label+'</span></div>').join('');
+}
+function renderLineages(){
+ $('lineages').innerHTML=summaries.map(s=>'<tr data-founder="'+s.founderId+'" style="'+(s.founderId===selectedFounder?'background:#253141':'')+'"><td>'+s.founderId+'</td><td>'+fmt(s.members)+'</td><td>'+fmt(s.descendants)+'</td><td>'+fmt(s.alive)+'</td><td>'+fmt(s.dead)+'</td><td>'+fmt(s.maxGeneration)+'</td><td>'+fmt(s.firstBirth)+'</td><td>'+fmt(s.lastBirth)+'</td><td>'+s.status+'</td></tr>').join('')||'<tr><td colspan="9">No founder lineages found.</td></tr>';
+ $('lineages').querySelectorAll('tr[data-founder]').forEach(tr=>tr.addEventListener('click',()=>selectFounder(Number(tr.dataset.founder))));
+}
+function fillSelect(){
+ const sel=$('founder');sel.disabled=!summaries.length;
+ sel.innerHTML=summaries.map(s=>'<option value="'+s.founderId+'">Founder '+s.founderId+' · '+s.members+' members · '+s.status+'</option>').join('');
+ if(selectedFounder!==null)sel.value=String(selectedFounder);
+}
+function selectFounder(id){selectedFounder=id;$('founder').value=String(id);renderLineages();renderTree();}
+function renderTree(){
+ const canvas=$('tree'),ctx=canvas.getContext('2d');
+ const rect=canvas.getBoundingClientRect(),dpr=window.devicePixelRatio||1;
+ canvas.width=Math.max(500,Math.floor(rect.width*dpr));canvas.height=Math.max(300,Math.floor(440*dpr));
+ ctx.scale(dpr,dpr);const w=canvas.width/dpr,h=canvas.height/dpr;
+ ctx.fillStyle='#10151f';ctx.fillRect(0,0,w,h);
+ const summary=summaries.find(s=>s.founderId===selectedFounder);
+ if(!summary){$('treeTitle').textContent='Family tree';return;}
+ const nodes=summary.organisms;
+ const byGen=new Map();
+ for(const o of nodes){if(!byGen.has(o.generation))byGen.set(o.generation,[]);byGen.get(o.generation).push(o);}
+ const maxGen=Math.max(0,...byGen.keys()),padX=34,padY=32;
+ const xStep=maxGen===0?0:(w-2*padX)/maxGen;
+ const coords=new Map();
+ for(const [gen,arr] of byGen){
+   arr.sort((a,b)=>a.id-b.id);
+   arr.forEach((o,index)=>{
+     const x=padX+gen*xStep;
+     const y=(index+1)*(h-2*padY)/(arr.length+1)+padY/2;
+     coords.set(o.id,{x,y});
+   });
+ }
+ // Draw edges first so nodes remain visible.
+ ctx.lineWidth=1;ctx.strokeStyle='rgba(151,171,196,.32)';
+ for(const o of nodes){
+   if(o.parentId===-1)continue;
+   const a=coords.get(o.parentId),b=coords.get(o.id);if(!a||!b)continue;
+   ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();
+ }
+ for(const [gen,arr] of byGen){
+   const x=padX+gen*xStep;
+   ctx.fillStyle='#8995a8';ctx.font='11px system-ui';ctx.textAlign='center';ctx.fillText('Gen '+gen,x,16);
+   for(const o of arr){
+     const p=coords.get(o.id),alive=o.deathTick===null||o.deathTick===undefined;
+     ctx.beginPath();ctx.arc(p.x,p.y,arr.length>180?2.2:4,0,Math.PI*2);
+     ctx.fillStyle=alive?'#76d6c4':'#7b8495';ctx.fill();
+     if(arr.length<45){ctx.fillStyle='#dce3ed';ctx.font='10px system-ui';ctx.textAlign=p.x>w-70?'right':'left';ctx.fillText('#'+o.id,p.x+(p.x>w-70?-7:7),p.y-5);}
+   }
+ }
+ $('treeTitle').textContent='Family tree · Founder '+summary.founderId;
+ $('treeInfo').textContent=fmt(summary.members)+' organisms across '+(maxGen+1)+' generations. '+fmt(summary.alive)+' alive and '+fmt(summary.dead)+' dead at export. The drawing spaces organisms by generation; vertical position is for readability and does not represent a biological variable.';
+}
+function downloadCSV(){
+ const header=['founderId','members','descendants','alive','dead','maxGeneration','firstBirthTick','lastBirthTick','status'];
+ const rows=summaries.map(s=>[s.founderId,s.members,s.descendants,s.alive,s.dead,s.maxGeneration,s.firstBirth,s.lastBirth,s.status]);
+ const csv=[header,...rows].map(row=>row.map(v=>'"'+String(v).replace(/"/g,'""')+'"').join(',')).join('\r\n');
+ const url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));
+ const a=document.createElement('a');a.href=url;a.download='hex-ca-lineage-summary.csv';a.click();URL.revokeObjectURL(url);
+}
+$('file').addEventListener('change',async e=>{
+ const file=e.target.files[0];if(!file)return;
+ try{loadData(JSON.parse(await file.text()));}catch(err){setStatus('Could not load file: '+err.message);$('download').disabled=true;}
+});
+$('founder').addEventListener('change',e=>selectFounder(Number(e.target.value)));
+$('download').addEventListener('click',downloadCSV);
+window.addEventListener('resize',()=>{if(data)renderTree();});
+})();
+</script></body></html>
