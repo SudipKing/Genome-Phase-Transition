@@ -45,6 +45,10 @@ class HexCA {
         // Founder identity is independent of mutable genome content.
         this.ancestorId = new Int32Array(this.N).fill(-1);
         this.nextAncestorId = 0;
+        // Each organism has a unique identity, separate from its founder lineage.
+        this.organismId = new Int32Array(this.N).fill(-1);
+        this.parentId = new Int32Array(this.N).fill(-1);
+        this.nextOrganismId = 0;
         this.nextColor  = new Int8Array(this.N).fill(-1);
         this.prevColor  = new Int8Array(this.N).fill(-1);
         this.birthTick  = new Int32Array(this.N);
@@ -263,6 +267,8 @@ class HexCA {
                     const c = randomInt(n);
                     this.color[i] = c;
                     this.ancestorId[i] = this.nextAncestorId++;
+                    this.organismId[i] = this.nextOrganismId++;
+                    this.parentId[i] = -1;
                     this.mtf[i * n] = c;
                     let slot = 1;
                     for (let ci = 0; ci < n; ci++) if (ci !== c) this.mtf[i * n + slot++] = ci;
@@ -489,8 +495,10 @@ class HexCA {
             }
             genomeSize[targetKey] = newSize;
             writeColor[targetKey] = color[i];
-            // Descendants inherit founder identity even when genome rules mutate.
+            // Keep founder lineage separate from parentage and genome mutation.
             this.ancestorId[targetKey] = this.ancestorId[i];
+            this.parentId[targetKey] = this.organismId[i];
+            this.organismId[targetKey] = this.nextOrganismId++;
             birthTick[targetKey]  = this.tick;
             counter[targetKey]    = 0;
             counter[i]            = 0;
