@@ -54,6 +54,11 @@ function exportRuleSpace() {
     if (currentStats) currentStats.rs.exportJSON();
 }
 
+function exportGenealogy() {
+    const hexca = gameEngine.entities.find((entity) => entity instanceof HexCA);
+    if (hexca) hexca.exportGenealogy();
+}
+
 window.addEventListener('keydown', (e) => {
     const t = e.target.tagName;
     if (t === 'INPUT' || t === 'SELECT' || t === 'TEXTAREA') return;
