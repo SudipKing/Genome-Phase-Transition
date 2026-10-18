@@ -13,3 +13,10 @@ Founder IDs reset with each simulation reset and should not be compared as IDs a
 The current priority is tracking which founder lineages persist, expand, or disappear. Later, repeated runs can be compared and lineage survival related to observed phase transitions and genome characteristics. Colors support visual inspection but are not quantitative evidence by themselves.
 
 Keys 1–4 switch statistics pages, G toggles genotype coloring, L toggles founder-lineage coloring, O cycles raster ordering, M marks a reference, and E exports rule-space JSON.
+
+
+## Individual and parent tracking
+- Each initially living organism receives a unique individual ID and has no parent (parent ID `-1`).
+- Each offspring receives a new individual ID and records the individual ID of the organism that reproduced it as its parent ID.
+- Founder lineage ID remains separate and is inherited from the original founder, even when the offspring's genome mutates.
+- Individual IDs are unique within one simulation run and reset when the simulation is reset. Parent IDs can later be used to reconstruct ancestry; a full family tree visualization is a later step.
