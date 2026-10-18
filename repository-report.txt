@@ -1,0 +1,579 @@
+HEX CA: DETAILED REPOSITORY REPORT
+Prepared: October 9, 2026
+
+Scope
+-----
+This report covers the existing repository's cellular automaton, genome
+representation, transition rules, reproduction, mutation, statistics,
+implementation defects, performance, and research limitations.
+
+The findings are based on reading the repository and running small, controlled
+examples directly against the simulation code. No large parameter sweep was
+performed. The inspection did not change simulation source files.
+
+Overview
+--------
+The repository implements a compact artificial-life model with an evolutionary
+feedback loop: cells must maintain rules that keep them alive, but larger rule
+sets cost more energy to reproduce. The implementation also adds
+activity-dependent mutation and rewards for color cycling.
+
+Several implementation defects affect these mechanisms. The project is useful
+for exploration, but history-dependent behavior, inherited rule activity, and
+some reproduction results need correction before they support reliable research
+conclusions.
+
+1. PROJECT STRUCTURE AND EXECUTION
+==================================
+
+The project is a standalone browser application built with JavaScript and
+Canvas. There is no package manifest, external runtime dependency, or existing
+test suite in the inspected directory.
+
+Files and responsibilities:
+
+  hexca.js       Grid, genomes, transitions, reproduction, mutation, per-tick
+                 statistics, and grid drawing.
+  params.js      Default parameters and loading values from controls.
+  stats.js       Sampling statistics and configuring plots.
+  graph.js       Time-series plots.
+  histogram.js   Distribution heatmaps with mean overlays.
+  gameengine.js  Animation loop and entity updates.
+  main.js        Startup and reset.
+  index.html     Interface, controls, and script loading.
+  style.css      Interface layout and styling.
+  util.js        Random numbers, shuffling, and colors.
+  assetmanager.js  Generic asset-loading utility used at startup.
+  spec.md        Original model specification.
+  CLAUDE.md      Project description and implementation guidance.
+
+On startup, main.js creates a HexCA instance and a Stats instance, in that
+order. Each engine update advances the automaton first, then lets Stats read
+the resulting measurements.
+
+The default is 50 simulation ticks per rendered frame. Simulation speed depends
+on browser performance; a tick is a discrete model step, not a fixed duration
+in real time.
+
+Reset reconstructs both the population and its statistics.
+
+2. SPATIAL MODEL AND CELL STATE
+==============================
+
+The default grid contains 6,000 sites: 100 columns by 60 rows. It uses flat-top
+hexagons, with alternating columns vertically offset. Both axes wrap, producing
+a periodic domain. Each site has six neighbors.
+
+Each site stores more than its visible color:
+
+  color        Current color, or -1 for empty.
+  nextColor    Working state for synchronous updates.
+  prevColor    Snapshot used by history and coherence logic.
+  genomes      Rule outputs for every possible condition.
+  genomeSize   Number of present rules.
+  counter      Accumulated reproduction energy.
+  mtf          Move-to-front ordering of colors.
+  firedSelf    Conditions successfully used during the cell's lifetime.
+  firedParent  Intended inherited rule-activity information.
+  birthTick    Birth time for age calculations.
+
+Empty sites do not evaluate rules and cannot spontaneously become alive. Birth
+requires reproduction from an existing cell. Complete extinction is therefore
+an absorbing state unless the user resets the simulation.
+
+Death marks the site empty; it does not immediately erase its other arrays.
+Reproduction overwrites the relevant state when a site is occupied again.
+
+3. TRANSITION RULES AND GENOME REPRESENTATION
+===========================================
+
+A normal rule condition is:
+
+  (current color, count of color 0, count of color 1, ...) -> output color
+
+For example, with three colors:
+
+  (A, 2 A-neighbors, 1 B-neighbor, 0 C-neighbors) -> B
+
+The remaining three neighbors are empty.
+
+The condition depends on counts, not directions. Rearranging the same neighbors
+around a cell leaves the rule condition unchanged. This gives local rules
+rotational symmetry, although surrounding dynamics can still form directional
+patterns.
+
+The code enumerates every possible condition and assigns it an index. Each
+cell's genome is a dense Int8Array segment indexed by that condition:
+
+  -1             The rule is absent.
+  0 through n-1  The rule's output color.
+
+There is no rule search, precedence, wildcard matching, or duplicate-condition
+ambiguity. Lookup directly selects one slot using a base-7 encoded condition
+key and a condition-index lookup array.
+
+For n colors, the number of conditions is:
+
+  C = n * binomial(n + 6, n)
+
+History mode includes another color in the condition and multiplies this count
+by n:
+
+  Colors    Normal condition slots    History condition slots
+  3         252                       756
+  4         840                       3,360
+  5         2,310                     11,550
+  6         5,544                     33,264
+
+Genome size is the number of occupied slots. Allocated storage remains the same
+regardless of how many rules are absent.
+
+This differs from the specification's description of an unbounded ordered rule
+list. The implemented genome is bounded by the finite condition space.
+
+The specification's full-rule-space count describes individual condition/output
+possibilities. The number of possible complete genome assignments is much
+larger:
+
+  (n + 1)^C
+
+Each slot independently contains absence or one of n outputs.
+
+4. INITIAL POPULATION
+=====================
+
+Every site independently starts alive with probability initialDensity, default
+0.2. Living sites receive a uniformly random color and an independently
+generated genome.
+
+Rule inclusion favors sparse neighborhoods:
+
+  P(rule present) = p_floor + (1 - p_floor) * n_empty / 6
+
+With the default floor of 0.05:
+
+  Empty neighbors    Rule inclusion probability
+  0                  5%
+  3                  52.5%
+  6                  100%
+
+This is a substantial initial bias. Cells are better equipped for sparse
+environments than crowded ones, so early dynamics are shaped by that choice as
+well as subsequent selection.
+
+Randomness comes from Math.random(). There is no configurable seed or saved
+random-generator state, so runs cannot currently be reproduced exactly from
+parameters alone.
+
+5. ONE SIMULATION TICK
+=====================
+
+The update order is:
+
+  1. Prepare the working color array and snapshot current colors.
+  2. Clear the global encountered-condition flags.
+  3. Process living cells: count neighbors, evaluate a rule, update energy,
+     queue reproduction, and apply random death.
+  4. Award optional coherence energy.
+  5. Shuffle and process reproduction attempts.
+  6. Commit synchronous colors.
+  7. Calculate population, genome, age, and clustering statistics.
+  8. Increment the tick counter.
+
+This ordering is part of the model:
+
+  - A cell can earn energy and queue reproduction, then die randomly before
+    reproducing.
+  - Sites vacated during this tick can be filled during the reproduction pass.
+  - Newborns begin evaluating transition rules on the next tick.
+
+In synchronous mode, all rule lookups use colors at the beginning of the tick.
+
+In asynchronous mode, cells are shuffled and write their changes immediately.
+Later cells see earlier transitions and deaths. Reproduction still happens
+afterward; the entire model is not updated one complete cell lifecycle at a
+time.
+
+Switching update mode changes the model's causal behavior, not merely its speed.
+
+6. SURVIVAL AND REPRODUCTION ENERGY
+==================================
+
+A living cell dies immediately if its selected genome slot is absent. Otherwise
+it adopts the output color, including possible self-loops.
+
+Survivors then face independent random death, default probability 0.001 per
+tick. Ignoring rule deaths, this corresponds to an expected lifetime of roughly
+1,000 ticks.
+
+The reproduction counter is more sophisticated than the original specification
+suggests. It tracks a move-to-front ordering of colors.
+
+Example:
+
+  History ordering: [A, B, C]
+  A -> B earns 1 energy, producing [B, A, C]
+  B -> C earns 2 energy, producing [C, B, A]
+  C -> C earns 0 energy
+
+Consequences:
+
+  - Self-loops do not support reproduction.
+  - Alternating between two colors typically earns one energy per transition.
+  - Cycling through three colors can earn two per transition after the
+    ordering settles.
+  - Visiting less recently used colors is rewarded.
+
+The reproduction threshold is:
+
+  T = k * G
+
+Here G is genome size, and the default k is 0.1.
+
+A cell with 50 rules has threshold 5. A cell with 100 rules needs twice as much
+energy for the same threshold multiple.
+
+This creates competing pressures: more rules can cover more situations, while
+fewer rules can reproduce faster.
+
+The optional coherence bonus rewards neighboring cells that make the same
+old-color-to-new-color transition. It introduces a possible advantage for
+coordinated local activity, although its implementation has threshold-accounting
+problems described below.
+
+7. REPRODUCTION AND SPATIAL SPREADING
+====================================
+
+A reproduction attempt is queued when a color change crosses an energy
+threshold multiple.
+
+Its search radius is:
+
+  d = min(floor(E / T), 5)
+
+A breadth-first search finds empty sites within that radius, and one is selected
+uniformly at random.
+
+Important details:
+
+  - The search considers all empty sites within the radius, not just the
+    nearest ones.
+  - It can traverse occupied sites; these do not act as barriers.
+  - Failed attempts retain accumulated energy.
+  - A cell retries when another threshold multiple is crossed.
+  - A large energy increment can skip directly to a larger radius.
+  - Each queued cell makes at most one attempt during that tick.
+  - Successful reproduction resets the parent and child counters to zero,
+    discarding surplus energy.
+
+Attempts are shuffled so fixed grid order does not determine priority for empty
+sites.
+
+The child inherits the genome and color-history ordering, then receives
+mutations. Its birth time is recorded and its own firing flags are cleared.
+
+8. MUTATION AND ACTIVITY-DEPENDENT ADAPTATION
+==========================================
+
+Every condition slot is considered during reproduction. The following branches
+are mutually exclusive and run in priority order.
+
+  General mutation:
+    Reassign the slot to absence with 50% probability, otherwise a uniformly
+    random color.
+
+  Atrophy:
+    Delete an existing rule unused by the parent and its inherited activity
+    flags. Use the local rate if its condition was encountered globally, or
+    the global rate otherwise.
+
+  Positive insertion:
+    Add an output to an absent rule if its condition was encountered globally.
+
+Default probabilities:
+
+  General mutation    0.01 per condition
+  Local atrophy       0.02
+  Global atrophy      0.10
+  Positive insertion  0.02
+
+General mutation applies to all condition slots, including absent rules. It can
+insert, delete, change an output, or leave the value unchanged. The parent genome
+is not changed by offspring mutation.
+
+For three colors, 1% mutation means an average of 2.52 general-mutation
+assignments per birth. For six colors, this becomes 55.44, before atrophy and
+positive insertion. These counts refer to assignments, not necessarily changes
+to the inherited value.
+
+Keeping the same mutation rate while changing the number of colors does not
+keep the per-genome mutation burden constant.
+
+Activity flags are lifetime records, not a rolling window. Once a parent has
+fired a rule, that rule remains protected from atrophy for the rest of that
+parent's life. General mutation can still alter it.
+
+The global feedback matters scientifically: mutation depends on conditions
+encountered anywhere in the population, rather than only the reproducing cell's
+neighborhood. Transitions are local, but evolutionary feedback includes
+population-wide information.
+
+9. WHAT THE STATISTICS ACTUALLY MEASURE
+======================================
+
+HexCA computes measurements every tick. Stats samples them every 1,000 ticks by
+default.
+
+  Population:
+    Living sites divided by all sites. A snapshot.
+
+  Color fractions:
+    Cells of each color divided by living cells. A snapshot.
+
+  Birth rate:
+    Birth events divided by elapsed ticks. An interval average.
+
+  Rule-death rate:
+    Missing-rule deaths divided by elapsed ticks. An interval average.
+
+  Mean genome size:
+    Present rules divided by living cells. A snapshot.
+
+  Genome distribution:
+    Counts in 20 genome-size buckets. A snapshot.
+
+  Clustering:
+    Mean same-color fraction among living neighbors. A snapshot.
+
+  Mean age:
+    Average age of currently living cells. A snapshot.
+
+  Age distribution:
+    Counts in 20 age buckets. A snapshot.
+
+Interpretation limits:
+
+  - Clustering is color agreement, not a graph-theoretic clustering coefficient
+    or a measure of genetic similarity.
+  - Isolated cells are excluded from clustering's average.
+  - Cells with one living neighbor and six living neighbors receive equal
+    weight in that average.
+  - Mean age is not mean lifespan; it describes survivors.
+  - Random deaths are counted internally but not stored in a plotted series.
+  - Genome size measures rule quantity, not diversity, functional complexity,
+    or information content.
+
+The heatmaps normalize each sample's buckets by its population, so they show
+distribution proportions.
+
+The plots display a recent window, but the underlying data arrays retain the
+full history.
+
+10. VERIFIED IMPLEMENTATION DEFECTS
+===================================
+
+The following findings affect model behavior, rather than just presentation.
+
+10.1 History conditions lose previous-tick state
+
+  prevColor is overwritten before lookup. A controlled example with current
+  color 0 and previous color 2 selected the 0/0 condition and died despite
+  having a 0/2 rule.
+
+  History mode consequently does not implement the advertised previous-tick
+  dependence. For a processed living cell, the snapshot equals its current
+  color when the condition is evaluated.
+
+10.2 History-mode initialization reads the wrong fields
+
+  Genome generation assumes neighbor counts start immediately after current
+  color. In history mode it instead includes previous color and omits the
+  last neighbor-color count. The sparse-neighborhood initialization probability
+  is therefore calculated from the wrong fields.
+
+10.3 Parental firing activity is not inherited
+
+  Copying occurs within firedParent, whose initial values are zero, rather than
+  from firedSelf. A child inherited zero for a rule its parent had just fired.
+
+  Under normal initialization, firedParent remains zero through generations,
+  defeating the intended two-generation activity protection.
+
+10.4 Synchronous child color and history disagree
+
+  The child receives the parent's pre-transition color and post-transition
+  history. A controlled birth produced child color 0 with color 1 at the front
+  of its history.
+
+  This inconsistency can affect the energy awarded for later color changes.
+  Asynchronous reproduction copies the parent's updated color because color
+  is also the working array in that mode.
+
+10.5 Coherence crossings do not queue reproduction
+
+  Threshold checks happen before coherence energy is added. Two cells reached
+  their threshold through coherence but produced no births.
+
+  A crossing caused by coherence is not directly queued. Later transition
+  checks can use that increased energy when determining a subsequent radius,
+  but this does not recover the skipped attempt.
+
+  Fractional coherence bonuses are also truncated because the counter is an
+  Int32Array. A 0.5-energy addition can disappear rather than accumulate across
+  ticks.
+
+10.6 Queued reproduction can survive replacement of its owner
+
+  A dead queued cell can be recolonized before its queue entry runs. The code
+  checks whether the site is alive, rather than whether it still contains the
+  original parent.
+
+  With controlled queue order and target selection, the newborn reused the
+  dead occupant's attempt, producing two births from one surviving original
+  parent. This probe demonstrates the edge case; it does not measure how often
+  it occurs in unconstrained runs.
+
+10.7 Six-color history lookup overflows
+
+  Condition indices use signed 16-bit storage. The final valid index, 33,263,
+  was stored as -32,273. Those lookups are treated as invalid.
+
+  Six-color history mode also exposes a potential overflow in genomeSize if a
+  genome contains more than 32,767 rules.
+
+11. DOCUMENTATION AND VISUALIZATION INCONSISTENCIES
+=================================================
+
+The implementation has evolved beyond the specification:
+
+  Specification or label             Actual implementation
+  One unit per color change          Move-to-front position determines energy
+  Unbounded rule list                Finite condition-indexed array
+  Increasing reproduction reach      Reach capped at five steps
+  Positive mutation: death conditions  All encountered conditions
+  Global conditions from last tick   Current tick's conditions
+  Two-generation firing protection   Inherited flags remain zero
+
+The age heatmap needs particular care. Each historical column is bucketed
+against that sample's maximum age, but the displayed axis and mean overlay use
+the latest maximum. A given vertical position does not represent the same
+absolute age throughout the history.
+
+The heatmap color formula also runs opposite to its comment: zero frequency
+maps to white, while higher frequencies move toward blue and black. Without a
+legend, readers could interpret this backward.
+
+12. PERFORMANCE AND REPRODUCIBILITY
+===================================
+
+The code makes sensible performance choices: flat typed arrays, reusable
+breadth-first-search buffers, and direct condition lookup.
+
+The main scaling costs are:
+
+  - Per-tick transition and spatial-statistics passes over the grid.
+  - A complete condition-slot scan for every birth.
+  - Genome copying.
+  - Storage proportional to grid sites multiplied by condition slots.
+
+For the default 6,000-site grid, the genome and two firing arrays alone require
+approximately the following combined storage, in decimal megabytes:
+
+  Configuration                    Storage
+  Three colors, normal rules       4.5 MB
+  Six colors, normal rules         99.8 MB
+  Six colors, history rules        598.8 MB
+
+These figures exclude lookup arrays, other cell state, plotting history, and
+browser overhead.
+
+Statistics are calculated every tick even when sampled infrequently. Long runs
+also retain unbounded plot history, and graph autoscaling scans all stored
+values. Eventually, the spread operations used by Math.min and Math.max can
+encounter JavaScript argument limits.
+
+The repository currently lacks seeded randomness, batch experiments, saved
+configurations and checkpoints, data export, and replicate summaries. These
+gaps make comparisons across runs harder to reproduce and assess.
+
+13. WHAT THE MODEL CAN ESTABLISH AND WHAT IS STILL MISSING
+========================================================
+
+The existing model can explore competition between:
+
+  - Survival coverage and reproductive cost.
+  - Color cycling and stagnation.
+  - Sparse and crowded environments.
+  - Rule retention and atrophy.
+  - Mutation and persistence.
+  - Local activity and spatial color agreement.
+
+These are mechanisms implied by the code. This inspection did not establish
+which outcomes dominate in actual long runs.
+
+The current plots can reveal population changes and patterns, but they do not
+establish evolutionary innovation or a phase transition by themselves. The
+model has no imposed resource economy, explicit species definition, lineage
+tracking, or direct measure of genome diversity.
+
+For phase-transition research, useful additions would include:
+
+  - Fraction of living cells changing color per tick.
+  - Extinction probability and time to extinction across replicate runs.
+  - Genetic diversity and distances between genomes.
+  - Spatial correlation lengths and connected-component sizes.
+  - Rule-use frequencies and functional genome size.
+  - Reproductive success and descendant counts by lineage.
+  - Parameter sweeps with uncertainty estimates.
+
+14. RECOMMENDED ORDER OF WORK
+============================
+
+First, correct the history state, firing inheritance, newborn state, queue
+ownership, coherence accounting, and integer-width problems. Small deterministic
+examples should verify each mechanism.
+
+Next, align the specification with the intended model and clarify the age and
+heatmap displays.
+
+Finally, add seeded runs and data export before conducting parameter sweeps.
+This would turn the current interactive prototype into a more dependable
+experimental tool.
+
+The central evolutionary tradeoff is already present and clearly implemented.
+The most consequential work is making the auxiliary mechanisms agree with
+their intended meaning, then measuring activity, diversity, and spatial
+organization directly.
+
+SOURCE REFERENCES
+=================
+
+Paths are relative to the repository directory containing this report:
+
+  hexca.js       Core model and implementation findings.
+  stats.js       Sampling and plotted measurements.
+  params.js      Defaults and parameter loading.
+  histogram.js   Distribution rendering and age-scaling limitations.
+  graph.js       Time-series rendering and autoscaling.
+  gameengine.js  Update ordering and simulation ticks per frame.
+  main.js        Startup and reset behavior.
+  index.html     Controls and interface defaults.
+  spec.md        Original design specification.
+  CLAUDE.md      Project overview and design notes.
+
+VALIDATION NOTES
+================
+
+Controlled, in-memory Node.js examples loaded the existing source and used a
+minimal document stub. They verified:
+
+  - Synchronous child color versus inherited move-to-front ordering.
+  - Missing inherited parental firing flags.
+  - Loss of previous-color information in history lookup.
+  - Failure to queue reproduction on coherence-driven threshold crossings.
+  - Reuse of a dead occupant's queued reproduction after recolonization, with
+    reproduction order and target selection controlled for the example.
+  - Signed 16-bit overflow in the six-color history condition lookup.
+
+Other findings were established by source inspection. No long-run statistical
+outcomes or defect occurrence rates were measured.
