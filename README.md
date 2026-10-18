@@ -19,4 +19,14 @@ Keys 1–4 switch statistics pages, G toggles genotype coloring, L toggles found
 - Each initially living organism receives a unique individual ID and has no parent (parent ID `-1`).
 - Each offspring receives a new individual ID and records the individual ID of the organism that reproduced it as its parent ID.
 - Founder lineage ID remains separate and is inherited from the original founder, even when the offspring's genome mutates.
-- Individual IDs are unique within one simulation run and reset when the simulation is reset. Parent IDs can later be used to reconstruct ancestry; a full family tree visualization is a later step.
+- Individual IDs are unique within one simulation run and reset when the simulation is reset. Parent IDs are used to reconstruct ancestry and compute lineage statistics. Export the genealogy JSON from the simulation, then open `genealogy.html` in a browser and load that JSON to view the family tree and download a lineage summary CSV.
+
+
+## Genealogy analysis
+1. Run the simulation and click **Export family tree JSON**.
+2. Open [genealogy.html](./genealogy.html) in a browser.
+3. Select the exported JSON file.
+4. Inspect the run overview, compare founder lineages, and select a founder to view its family tree.
+5. Use **Download lineage summary CSV** to save the per-founder statistics for later analysis.
+
+The genealogy explorer processes the selected file locally in the browser. It reports recorded descendants, living and dead members at export, maximum generation depth, birth tick range, and whether each founder lineage is extinct at export. These are descriptive ancestry measures, not proof that a lineage caused a phase transition.
