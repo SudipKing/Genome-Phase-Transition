@@ -49,6 +49,8 @@ class HexCA {
         this.organismId = new Int32Array(this.N).fill(-1);
         this.parentId = new Int32Array(this.N).fill(-1);
         this.nextOrganismId = 0;
+        // Permanent records preserve ancestry after an organism dies or its cell is reused.
+        this.organismHistory = [];
         this.nextColor  = new Int8Array(this.N).fill(-1);
         this.prevColor  = new Int8Array(this.N).fill(-1);
         this.birthTick  = new Int32Array(this.N);
@@ -269,6 +271,10 @@ class HexCA {
                     this.ancestorId[i] = this.nextAncestorId++;
                     this.organismId[i] = this.nextOrganismId++;
                     this.parentId[i] = -1;
+                    this.organismHistory.push({
+                        id: this.organismId[i], parentId: -1, founderId: this.ancestorId[i],
+                        birthTick: 0, deathTick: null
+                    });
                     this.mtf[i * n] = c;
                     let slot = 1;
                     for (let ci = 0; ci < n; ci++) if (ci !== c) this.mtf[i * n + slot++] = ci;
@@ -385,6 +391,7 @@ class HexCA {
             encounterCellTicks++;
 
             if (rule === -1) {
+                this._recordOrganismDeath(i);
                 writeColor[i] = -1;
                 ruleDeathsThisTick++;
             } else {
@@ -418,6 +425,7 @@ class HexCA {
             }
 
             if (writeColor[i] !== -1 && Math.random() < pDeath) {
+                this._recordOrganismDeath(i);
                 writeColor[i] = -1;
                 randomDeathsThisTick++;
             }
@@ -499,6 +507,10 @@ class HexCA {
             this.ancestorId[targetKey] = this.ancestorId[i];
             this.parentId[targetKey] = this.organismId[i];
             this.organismId[targetKey] = this.nextOrganismId++;
+            this.organismHistory.push({
+                id: this.organismId[targetKey], parentId: this.organismId[i],
+                founderId: this.ancestorId[targetKey], birthTick: this.tick, deathTick: null
+            });
             birthTick[targetKey]  = this.tick;
             counter[targetKey]    = 0;
             counter[i]            = 0;
@@ -564,6 +576,56 @@ class HexCA {
 
         this.tick++;
         document.getElementById('tickCount').textContent = `Tick: ${this.tick}`;
+    }
+
+    // Record the first death only. The permanent history is independent of cell reuse.
+    _recordOrganismDeath(cellIndex) {
+        const id = this.organismId[cellIndex];
+        if (id < 0) return;
+        const record = this.organismHistory[id];
+        if (record && record.deathTick === null) record.deathTick = this.tick;
+    }
+
+    // Export the complete parent graph, including organisms that are no longer alive.
+    exportGenealogy() {
+        const childrenByParent = new Map();
+        for (const organism of this.organismHistory) {
+            if (organism.parentId < 0) continue;
+            if (!childrenByParent.has(organism.parentId)) childrenByParent.set(organism.parentId, []);
+            childrenByParent.get(organism.parentId).push(organism.id);
+        }
+
+        const organisms = this.organismHistory.map((organism) => ({
+            ...organism,
+            children: childrenByParent.get(organism.id) || [],
+            aliveAtExport: organism.deathTick === null
+        }));
+        const data = {
+            format: "hex-ca-genealogy-v1",
+            exportedAtTick: this.tick,
+            organismsRecorded: organisms.length,
+            liveOrganismsAtExport: organisms.filter((organism) => organism.aliveAtExport).length,
+            explanation: {
+                id: "Unique organism ID within this run",
+                parentId: "Immediate parent organism ID; -1 marks an initial founder",
+                founderId: "Initial founder lineage ID, distinct from the immediate parent",
+                birthTick: "Simulation tick when the organism was born",
+                deathTick: "Tick when it died, or null if alive at export",
+                children: "IDs of recorded offspring"
+            },
+            organisms
+        };
+
+        const blob = new Blob([JSON.stringify(data, null, 2)], {type: "application/json"});
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = "hex-ca-genealogy-tick-" + this.tick + ".json";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+        return data;
     }
 
     // ── Draw ──────────────────────────────────────────────────────────────────
