@@ -31,6 +31,9 @@ const $ = id => document.getElementById(id);
 let data = null, summaries = [], selectedFounder = null;
 const fmt = n => Number(n).toLocaleString();
 function setStatus(s){$('status').textContent=s;}
+// Loops instead of Math.max(...arr): spreading a lineage with ~100k+ members overflows the call stack.
+function maxOf(arr,init=-Infinity){let m=init;for(const v of arr)if(v>m)m=v;return m;}
+function minOf(arr,init=Infinity){let m=init;for(const v of arr)if(v<m)m=v;return m;}
 function escapeText(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function loadData(json){
  if(!json || !Array.isArray(json.organisms)) throw new Error('This file does not contain an organisms array. Please select a genealogy JSON export.');
@@ -60,7 +63,7 @@ function loadData(json){
    const alive=members.filter(o=>o.deathTick===null||o.deathTick===undefined).length;
    const gens=members.map(o=>o.generation);
    const births=members.map(o=>Number(o.birthTick)||0);
-   return {founderId,members:members.length,descendants:members.length-1,alive,dead:members.length-alive,maxGeneration:Math.max(0,...gens),firstBirth:Math.min(...births),lastBirth:Math.max(...births),status:alive?'Surviving':'Extinct',root:root||members.find(o=>o.parentId===-1),organisms:members};
+   return {founderId,members:members.length,descendants:members.length-1,alive,dead:members.length-alive,maxGeneration:maxOf(gens,0),firstBirth:minOf(births),lastBirth:maxOf(births),status:alive?'Surviving':'Extinct',root:root||members.find(o=>o.parentId===-1),organisms:members};
  }).sort((a,b)=>b.members-a.members);
  data={...json,map,ordered,founders,byFounder};
  selectedFounder=summaries.length?summaries[0].founderId:null;
@@ -70,7 +73,7 @@ function loadData(json){
 }
 function renderOverview(){
  const all=data.ordered, alive=all.filter(o=>o.deathTick===null||o.deathTick===undefined).length;
- const maxGen=Math.max(0,...all.map(o=>o.generation));
+ const maxGen=maxOf(all.map(o=>o.generation),0);
  const extinct=summaries.filter(s=>s.alive===0).length;
  const births=all.filter(o=>o.parentId!==-1).length;
  const items=[['Organisms recorded',all.length],['Alive at export',alive],['Died before export',all.length-alive],['Founder lineages',summaries.length],['Extinct lineages',extinct],['Offspring births recorded',births],['Deepest generation',maxGen],['Exported at tick',data.exportedAtTick??'—']];

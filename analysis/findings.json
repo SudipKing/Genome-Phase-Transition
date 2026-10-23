@@ -1,0 +1,46 @@
+{
+  "title": "Genome–Phase Progress Report",
+  "meta": ["Sudip", "Faculty mentor: Dr. Chris Marriott", "Week of Oct 19, 2026", "Repo: SudipKing/Genome-Phase-Transition"],
+  "lede": "The tooling from the last three weeks is merged and working, and this week it produced the first real data. Seven independent runs all passed through the same sequence of phases and all ended in the same final phase. Once the colours are relabeled, that final phase is carried by nearly the same small set of rules in every run. That is early support for the hypothesis that genomes characterize the phases.",
+  "findings": [
+    {"num": "7 of 7", "text": "runs ended in the same final phase: a <strong>full grid with only two colours</strong> (3 red-blue, 2 red-green, 2 green-blue), after 30k–161k ticks."},
+    {"num": "3", "unit": "phases", "text": "seen in every run: <strong>three-colour churn</strong> (≈40% alive, ≈66 rules per genome) → <strong>two-colour churn</strong> (55–80% alive, ≈50 rules) → <strong>two-colour full grid</strong> (100% alive, ≈21 rules). Genome size drops at each step. In 3 runs the first phase lasted under 5k ticks."},
+    {"num": "70%", "unit": "avg", "text": "of final-phase rules match between any two runs <strong>after relabeling the colours</strong> (range 43–92%, 21 pairs). Before relabeling, runs that ended in different colour pairs shared 0 rules."},
+    {"num": "4 + 5", "unit": "rules", "text": "form the signature: 4 rules appear in all 7 final genomes and 5 more in 6 of 7. All of them are for <strong>fully surrounded cells</strong>, and 88% of the final rules say <strong>flip to the other colour</strong>. The final phase is a grid of blinkers."},
+    {"num": "4–27% → 85–96%", "text": "is the share of consensus rules for <strong>fully surrounded</strong> cells, in the phase just before the grid fills and then after it fills (every run). The final transition is the genome moving from rules for <strong>empty neighbours</strong> to rules for full neighbourhoods and dropping the rest, which is why genome size falls from ≈50 to ≈21."},
+    {"num": "≈5,600", "unit": "of 6,000", "text": "living cells carry a unique genome at the end; the most common exact genome covers under 0.5% of cells. Comparing <strong>consensus genomes</strong> works where comparing exact genomes does not."},
+    {"num": "1", "unit": "founder", "text": "lineage out of ≈1,200 survives in every run, and it always wins <strong>before</strong> the final transition (at 7k–127k ticks). Founder colouring cannot separate the phases as built; lineages need to be reset at each phase change."}
+  ],
+  "done": [
+    {"when": "Late Sep", "what": "Project proposal", "detail": "TCSS 499, 2 credits: do distinct phases of the heterogeneous hex CA correspond to characteristic genomes or rules? Includes the 10-week plan; the final deliverable is a research paper."},
+    {"when": "Oct 9–12", "what": "Genotype colouring", "detail": "Ported the genome → colour projection from Hex-Turmites into my fork (press G)."},
+    {"when": "Oct 17", "what": "Merged both codebases", "detail": "Chris's rule-space, raster and trajectory views plus my genotype colouring, in the new Genome-Phase-Transition repo (commit c6b83a5)."},
+    {"when": "Oct 17", "what": "Lineage tracking", "detail": "Every organism gets organismId, parentId and founder ancestorId; founder colouring with L. Tested across sync, async, history-rule and 4-colour settings."},
+    {"when": "Oct 17", "what": "Family tree export and Genealogy Explorer", "detail": "Permanent records with birth and death ticks, JSON export, and genealogy.html for per-founder trees, stats and a CSV."},
+    {"when": "Oct 23", "what": "Headless batch runner", "isNew": true, "detail": "Runs the repo's own simulation code in Node with a seeded random number generator, so a seed reproduces a run exactly. Records the existing stats plus distinct-genome counts, the consensus genome, condition encounter rates and surviving founders every 1,000 ticks. Stops once the grid has stayed full for 40k ticks."},
+    {"when": "Oct 23", "what": "Seven runs and phase analysis", "isNew": true, "detail": "Default parameters, seeds 1–7. Each run is split into phases by which colours are present and whether the grid is full; final-phase consensus genomes are compared across runs, with and without colour relabeling."},
+    {"when": "Oct 23", "what": "Genealogy Explorer fix", "isNew": true, "detail": "It crashed on any lineage above roughly 100k members. Fixed on branch fix/genealogy-large-exports, not merged yet: a 5,000-tick export (740k organisms, 149 MB) now loads in about 7 seconds."}
+  ],
+  "setup": "Seven runs with the repo's default parameters: a 100 × 60 toroidal hex grid, 3 colours, 20% initial density (≈1,200 random founders), mutation rate 0.01, k = 0.1, random death 0.001 per tick. Samples are taken every 1,000 ticks. A phase is a stretch of at least 5 samples with the same set of colours above 8% of living cells, split again when the grid becomes ≥95% full.",
+  "crossIntro": "Each row below is one run's final consensus genome, limited to the conditions cells actually meet (over 0.1% of cell-ticks in any run). Read raw, the runs that ended in different colour pairs look unrelated. The table tries every way of relabeling the three colours and keeps the best match. On that view the final rulebooks mostly agree.",
+  "issues": [
+    "<b>Genealogy records grow too fast for full runs.</b> The churn phases have about 150 births per tick, so 5,000 ticks already produce 740k records and a 149 MB export. A complete run (70k–190k ticks) would be several GB. The full family tree is only practical for windows of a few thousand ticks.",
+    "<b>Genealogy Explorer crashed on large lineages.</b> It spread arrays with hundreds of thousands of values into <code>Math.max</code>, which overflows the call stack. Replaced with loops on a branch, pending review.",
+    "<b>The founder count is about 1,200, not 100.</b> Every initially living cell is a founder (20% of 6,000 cells). It doesn't matter in practice, because one founder takes over early anyway.",
+    "<b>An exact \"most common genome\" doesn't exist.</b> Mutation keeps almost every genome unique, so the analysis uses the consensus genome: the majority output at each of the 252 conditions, which 95% of cells match in the final phase."
+  ],
+  "next": [
+    "<b>Reset lineages at each phase change.</b> Give every living cell a new founder ID when the colour set changes, so lineage colouring shows which sub-family inside the winning lineage drives the next transition.",
+    "<b>Test the signature directly.</b> Seed a grid with the relabeled 14-rule blinker genome and see whether it holds the full phase. Then remove single rules to find which ones are essential.",
+    "<b>Scale up.</b> Run 20–30 seeds, then sweep mutation rate, k and random death, to check whether the three-phase sequence and the final signature hold and what controls the time to fill.",
+    "<b>Characterize the middle phase.</b> The two-colour churn phase still has a mixed consensus (≈30 rules, 86% agreement). Comparing its genomes across runs is the next genome-to-phase test.",
+    "<b>Bring the consensus strip into the simulator.</b> Add it as a stats page, so the genome change at each transition is visible live."
+  ],
+  "questions": [
+    "Is the two-colour full grid the \"immortal\" final state you showed me, and do you also see three-colour → two-colour → full when you run it in the browser?",
+    "Should a full grid and a churning population with the same colours count as different phases? What about seed 3's short, almost all-red stretch?",
+    "For the paper, should red-blue, red-green and green-blue count as one phase, given that the rules match after relabeling?",
+    "Do we still need the complete family tree, or are per-phase lineage summaries enough given the export size?"
+  ],
+  "footnote": "Data: seven seeded runs (seeds 1–7) of the repo's hexca.js at commit 2cd5e21, run headless. Each run stopped after the grid had stayed full for 40k ticks. Hover a run panel to read exact values. Analysis scripts: run.js, analyze.js, symmetry.js."
+}

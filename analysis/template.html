@@ -1,0 +1,329 @@
+<meta charset="utf-8">
+<title>Genome–Phase Progress Report</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a single lab-notebook column; each simulation run gets a stacked panel
+   (colour fractions → genome size → consensus-genome strip) sharing one time axis. */
+:root {
+  --bg: #f6f7f8; --surface: #ffffff; --ink: #14181d; --ink-2: #4a525c; --ink-3: #78818c;
+  --line: #dde1e6; --grid: #eceff2; --accent: #0f7c86; --accent-soft: #e2f1f2;
+  --cell-r: #e34948; --cell-g: #1baf7a; --cell-b: #2a78d6; --no-rule: #e7eaee;
+  --warn: #b56b00; --warn-soft: #fdf1dc;
+  --f-display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --f-body: "Instrument Sans", "Segoe UI", system-ui, sans-serif;
+  --f-mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #111417; --surface: #181c20; --ink: #eef1f4; --ink-2: #b4bcc6; --ink-3: #8a939e;
+  --line: #2b3138; --grid: #22272d; --accent: #4cc1c9; --accent-soft: #15302f;
+  --cell-r: #e66767; --cell-g: #199e70; --cell-b: #3987e5; --no-rule: #262b31;
+  --warn: #f0a640; --warn-soft: #332611; color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --bg: #111417; --surface: #181c20; --ink: #eef1f4; --ink-2: #b4bcc6; --ink-3: #8a939e;
+  --line: #2b3138; --grid: #22272d; --accent: #4cc1c9; --accent-soft: #15302f;
+  --cell-r: #e66767; --cell-g: #199e70; --cell-b: #3987e5; --no-rule: #262b31;
+  --warn: #f0a640; --warn-soft: #332611; color-scheme: dark; }
+
+body { background: var(--bg); color: var(--ink); font: 15.5px/1.6 var(--f-body); }
+.wrap { max-width: 980px; margin: 0 auto; padding-block: 40px 80px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: flex; flex-direction: column; gap: 44px; }
+h1, h2, h3 { font-family: var(--f-display); text-wrap: balance; line-height: 1.15; margin: 0; }
+h1 { font-size: clamp(1.9rem, 4.5vw, 2.7rem); font-weight: 700; letter-spacing: -0.01em; }
+h2 { font-size: 1.45rem; font-weight: 700; }
+h3 { font-size: 1.05rem; font-weight: 600; font-family: var(--f-body); }
+p { margin: 0; max-width: 68ch; }
+section { display: flex; flex-direction: column; gap: 16px; }
+.eyebrow { font: 500 12px/1 var(--f-mono); text-transform: uppercase; letter-spacing: .08em; color: var(--accent); }
+.meta { color: var(--ink-2); font-size: 14px; display: flex; flex-wrap: wrap; gap: 6px 18px; }
+.lede { font-size: 1.1rem; color: var(--ink-2); max-width: 64ch; }
+code, .mono { font-family: var(--f-mono); font-size: .88em; }
+.hexrow { display: flex; gap: 4px; margin-bottom: 6px; }
+.hexrow i { width: 14px; height: 12px; clip-path: polygon(25% 0,75% 0,100% 50%,75% 100%,25% 100%,0 50%); display: block; }
+
+/* Key findings */
+.findings { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+.finding { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.finding .num { font: 700 1.9rem/1 var(--f-display); font-variant-numeric: tabular-nums; }
+.finding .num small { font: 500 .85rem var(--f-body); color: var(--ink-2); margin-left: 4px; }
+.finding p { font-size: 14.5px; color: var(--ink-2); }
+.finding strong { color: var(--ink); }
+
+/* Done list */
+.done { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; border-top: 1px solid var(--line); }
+.done li { display: grid; grid-template-columns: 92px 1fr; gap: 14px; padding: 11px 0; border-bottom: 1px solid var(--line); }
+.done .when { font: 500 12.5px/1.6 var(--f-mono); color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.done .what { min-width: 0; }
+.done .what b { font-weight: 600; }
+.done .what span { color: var(--ink-2); display: block; font-size: 14.5px; }
+.tag { display: inline-block; font: 500 11px/1 var(--f-mono); padding: 3px 6px; border-radius: 4px; margin-left: 6px; vertical-align: 2px; background: var(--accent-soft); color: var(--accent); }
+.tag.new { background: var(--warn-soft); color: var(--warn); }
+
+/* Run panels */
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.runs { display: flex; flex-direction: column; gap: 22px; }
+.run { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px 12px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.run header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 16px; }
+.run header .seq { font: 500 12.5px var(--f-mono); color: var(--ink-2); }
+.chart { position: relative; width: 100%; }
+.chart svg, .chart canvas { display: block; width: 100%; }
+.chart .lab { font: 500 11.5px var(--f-mono); color: var(--ink-3); text-transform: uppercase; letter-spacing: .05em; margin: 4px 0 2px; }
+.tip { position: absolute; pointer-events: none; background: var(--ink); color: var(--bg); font: 12px/1.45 var(--f-mono); padding: 6px 9px; border-radius: 6px; white-space: nowrap; transform: translate(-50%, -110%); z-index: 3; font-variant-numeric: tabular-nums; }
+.tip[hidden] { display: none !important; }
+
+/* Tables */
+.tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; font-variant-numeric: tabular-nums; }
+th, td { padding: 8px 12px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th:first-child, td:first-child, th.l, td.l { text-align: left; }
+th { font: 500 11.5px var(--f-mono); text-transform: uppercase; letter-spacing: .05em; color: var(--ink-3); background: var(--surface); }
+tr:last-child td { border-bottom: 0; }
+.chip { display: inline-flex; gap: 2px; }
+.chip i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+
+/* Prose lists */
+.plain { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 10px; max-width: 70ch; }
+.plain li::marker { color: var(--accent); }
+.callout { border-left: 3px solid var(--warn); background: var(--warn-soft); padding: 12px 16px; border-radius: 0 8px 8px 0; max-width: 72ch; }
+.note { font-size: 13.5px; color: var(--ink-3); }
+@media (max-width: 560px) { .done li { grid-template-columns: 1fr; gap: 2px; } }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap">
+  <header style="display:flex;flex-direction:column;gap:12px">
+    <div class="hexrow" aria-hidden="true"><i style="background:var(--cell-r)"></i><i style="background:var(--cell-g)"></i><i style="background:var(--cell-b)"></i></div>
+    <div class="eyebrow">TCSS 499 · Directed research progress</div>
+    <h1 id="title"></h1>
+    <div class="meta" id="meta"></div>
+    <p class="lede" id="lede"></p>
+  </header>
+
+  <section>
+    <h2>Key findings so far</h2>
+    <div class="findings" id="findings"></div>
+  </section>
+
+  <section>
+    <h2>What has been built</h2>
+    <ul class="done" id="done"></ul>
+  </section>
+
+  <section>
+    <h2>The experiment</h2>
+    <p id="setup"></p>
+    <div class="tablewrap"><table id="runTable"></table></div>
+  </section>
+
+  <section>
+    <h2>Each run over time</h2>
+    <p>Each panel shares one time axis. The top band shows the share of living cells in each colour. The middle line shows the average genome size, with the size of the consensus genome dashed. The bottom strip is the <b>consensus genome</b>: one column per sample, one row per condition (252 in total), coloured by the output most cells agree on. The top 84 rows are the fully surrounded conditions (no dead neighbours). Watch the strip at the moment the grid fills: the population's shared rules jump from conditions with empty neighbours (lower rows) to fully surrounded ones (top band).</p>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--cell-r)"></i>red</span>
+      <span><i class="sw" style="background:var(--cell-g)"></i>green</span>
+      <span><i class="sw" style="background:var(--cell-b)"></i>blue</span>
+      <span><i class="sw" style="background:var(--no-rule);outline:1px solid var(--line)"></i>no rule (cell dies)</span>
+      <span><svg width="22" height="8" aria-hidden="true"><line x1="0" y1="4" x2="22" y2="4" stroke="var(--ink)" stroke-width="2"/></svg>mean genome size</span>
+      <span><svg width="22" height="8" aria-hidden="true"><line x1="0" y1="4" x2="22" y2="4" stroke="var(--accent)" stroke-width="2" stroke-dasharray="4 3"/></svg>consensus genome size</span>
+    </div>
+    <div class="runs" id="runs"></div>
+  </section>
+
+  <section>
+    <h2>Do the final phases share a genome?</h2>
+    <p id="crossIntro"></p>
+    <div class="chart" style="overflow-x:auto"><div class="lab">As run · final consensus genome, encountered conditions</div><canvas id="finalStrips" height="10"></canvas></div>
+    <div class="chart" style="overflow-x:auto"><div class="lab">Relabeled · the two surviving colours mapped onto red and blue</div><canvas id="canonStrips" height="10"></canvas></div>
+    <div class="tablewrap"><table id="pairTable"></table></div>
+    <h3>The signature rules</h3>
+    <p>Final-phase rules written in the relabeled red/blue form, counted by how many of the seven runs contain them. "R with 3R 3B → B" means a red cell with three red and three blue neighbours turns blue.</p>
+    <div class="tablewrap"><table id="ruleTable"></table></div>
+  </section>
+
+  <section>
+    <h2>Problems found and fixed</h2>
+    <ul class="plain" id="issues"></ul>
+  </section>
+
+  <section>
+    <h2>Proposed next steps</h2>
+    <ul class="plain" id="next"></ul>
+  </section>
+
+  <section>
+    <h2>Questions for Chris</h2>
+    <ul class="plain" id="questions"></ul>
+  </section>
+
+  <p class="note" id="footnote"></p>
+</div>
+
+<script>
+const DATA = /*__DATA__*/null;
+const F = /*__FINDINGS__*/null;
+const $ = id => document.getElementById(id);
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const fmt = n => Number(n).toLocaleString('en-US');
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const CELL = ['--cell-r', '--cell-g', '--cell-b'];
+
+// ── Prose ────────────────────────────────────────────────────────────────────
+$('title').textContent = F.title;
+$('meta').innerHTML = F.meta.map(m => '<span>' + m + '</span>').join('');
+$('lede').innerHTML = F.lede;
+$('findings').innerHTML = F.findings.map(f => '<div class="finding"><div class="num">' + f.num + (f.unit ? '<small>' + f.unit + '</small>' : '') + '</div><p>' + f.text + '</p></div>').join('');
+$('done').innerHTML = F.done.map(d => '<li><div class="when">' + d.when + '</div><div class="what"><b>' + d.what + '</b>' + (d.isNew ? '<span class="tag new">this week</span>' : '') + '<span>' + d.detail + '</span></div></li>').join('');
+$('setup').innerHTML = F.setup;
+$('crossIntro').innerHTML = F.crossIntro;
+for (const k of ['issues', 'next', 'questions']) $(k).innerHTML = F[k].map(x => '<li>' + x + '</li>').join('');
+$('footnote').innerHTML = F.footnote;
+
+// ── Run summary table ────────────────────────────────────────────────────────
+const chip = label => '<span class="chip">' + [...label].map(ch => '<i style="background:var(' + CELL['RGB'.indexOf(ch)] + ')" title="' + ch + '"></i>').join('') + '</span>';
+{
+  const rows = DATA.runs.map(r => {
+    const last = r.phases[r.phases.length - 1];
+    const full = r.series.pop.findIndex(p => p >= 0.99);
+    return '<tr><td>Seed ' + r.seed + '</td><td class="l mono">' + r.phases.map(p => esc(p.label)).join(' → ') + '</td><td>' + fmt(r.lastFounderTick ?? '—') + '</td><td>' + (full >= 0 ? fmt(r.series.tick[full]) : 'not reached') + '</td><td>' + last.meanGenome.toFixed(1) + '</td><td>' + (r.series.consensusSize[r.series.consensusSize.length - 1]) + '</td><td>' + fmt(Math.round(last.distinctGenomes)) + '</td><td>' + fmt(r.ticks) + '</td></tr>';
+  }).join('');
+  $('runTable').innerHTML = '<thead><tr><th>Run</th><th class="l">Colour phases</th><th>One founder left at tick</th><th>Grid full at tick</th><th>Final mean genome</th><th>Final consensus rules</th><th>Distinct genomes at end</th><th>Ticks run</th></tr></thead><tbody>' + rows + '</tbody>';
+}
+
+// Conditions ordered by number of dead neighbours (0 = fully surrounded) then enumeration.
+const nDead = DATA.conditions.map(c => 6 - (c[1] + c[2] + c[3]));
+const order = DATA.conditions.map((_, i) => i).sort((a, b) => nDead[a] - nDead[b] || a - b);
+const SYMCOL = ch => ch === '.' ? css('--no-rule') : css(CELL['RGB'.indexOf(ch)]);
+
+// ── Per-run panels ───────────────────────────────────────────────────────────
+const W = 900, H1 = 70, H2 = 80, padL = 34, padR = 8;
+function xScale(r) { const t = r.series.tick, t0 = 0, t1 = t[t.length - 1]; return v => padL + (v - t0) / (t1 - t0) * (W - padL - padR); }
+
+function panel(r) {
+  const el = document.createElement('article'); el.className = 'run';
+  const fullIdx = r.series.pop.findIndex(p => p >= 0.99);
+  el.innerHTML = '<header><h3>Seed ' + r.seed + '</h3><div class="seq">' + r.phases.map(p => esc(p.label)).join(' → ') + (fullIdx >= 0 ? ' · grid full at tick ' + fmt(r.series.tick[fullIdx]) : '') + '</div></header>';
+  const x = xScale(r), s = r.series, t = s.tick;
+  const ticksX = niceTicks(t[t.length - 1]);
+
+  // Colour fractions as a stacked area of living cells (height = population fraction).
+  const c1 = document.createElement('div'); c1.className = 'chart';
+  let svg = '<svg viewBox="0 0 ' + W + ' ' + H1 + '" role="img" aria-label="Population by colour, seed ' + r.seed + '">';
+  svg += '<text x="0" y="10" font-size="10" fill="var(--ink-3)" font-family="var(--f-mono)">alive</text><text x="0" y="' + (H1 - 2) + '" font-size="10" fill="var(--ink-3)" font-family="var(--f-mono)">0</text>';
+  let base = t.map(() => 0);
+  for (let c = 0; c < 3; c++) {
+    const top = base.map((b, i) => b + s.colors[c][i] * s.pop[i]);
+    const y = v => H1 - 2 - v * (H1 - 6);
+    let d = 'M' + x(t[0]) + ',' + y(base[0]);
+    for (let i = 0; i < t.length; i++) d += 'L' + x(t[i]).toFixed(1) + ',' + y(top[i]).toFixed(1);
+    for (let i = t.length - 1; i >= 0; i--) d += 'L' + x(t[i]).toFixed(1) + ',' + y(base[i]).toFixed(1);
+    svg += '<path d="' + d + 'Z" fill="var(' + CELL[c] + ')" opacity=".9"/>';
+    base = top;
+  }
+  svg += '<line x1="' + padL + '" x2="' + (W - padR) + '" y1="' + (H1 - 2 - (H1 - 6)) + '" y2="' + (H1 - 2 - (H1 - 6)) + '" stroke="var(--grid)" stroke-dasharray="2 3"/>';
+  svg += '</svg>';
+  c1.innerHTML = '<div class="lab">Living cells by colour (top dashed line = grid full)</div>' + svg;
+  el.appendChild(c1);
+
+  // Genome size.
+  const c2 = document.createElement('div'); c2.className = 'chart';
+  const gMax = Math.max(80, ...s.meanGenome);
+  const yg = v => H2 - 14 - v / gMax * (H2 - 22);
+  let g = '<svg viewBox="0 0 ' + W + ' ' + H2 + '" role="img" aria-label="Genome size over time, seed ' + r.seed + '">';
+  for (const gv of [0, 20, 40, 60, 80].filter(v => v <= gMax)) g += '<line x1="' + padL + '" x2="' + (W - padR) + '" y1="' + yg(gv) + '" y2="' + yg(gv) + '" stroke="var(--grid)"/><text x="' + (padL - 6) + '" y="' + (yg(gv) + 3.5) + '" text-anchor="end" font-size="10" fill="var(--ink-3)" font-family="var(--f-mono)">' + gv + '</text>';
+  for (const tv of ticksX) g += '<text x="' + x(tv) + '" y="' + (H2 - 2) + '" text-anchor="middle" font-size="10" fill="var(--ink-3)" font-family="var(--f-mono)">' + (tv / 1000) + 'k</text>';
+  const line = (arr, attrs) => '<polyline fill="none" ' + attrs + ' points="' + arr.map((v, i) => x(t[i]).toFixed(1) + ',' + yg(v).toFixed(1)).join(' ') + '"/>';
+  g += line(s.consensusSize, 'stroke="var(--accent)" stroke-width="2" stroke-dasharray="4 3"');
+  g += line(s.meanGenome, 'stroke="var(--ink)" stroke-width="2"');
+  g += '<line class="xh" x1="0" x2="0" y1="4" y2="' + (H2 - 14) + '" stroke="var(--ink-3)" visibility="hidden"/></svg>';
+  c2.innerHTML = '<div class="lab">Rules per genome · tick (thousands)</div>' + g;
+  el.appendChild(c2);
+
+  // Consensus genome strip.
+  const c3 = document.createElement('div'); c3.className = 'chart';
+  c3.innerHTML = '<div class="lab">Consensus genome · 252 conditions (top: fully surrounded)</div>';
+  const cv = document.createElement('canvas'); cv.width = r.strip.length; cv.height = 252;
+  cv.style.height = '210px'; cv.style.imageRendering = 'pixelated';
+  cv.setAttribute('role', 'img'); cv.setAttribute('aria-label', 'Consensus genome over time, seed ' + r.seed);
+  c3.appendChild(cv); el.appendChild(c3);
+  const drawStrip = () => {
+    const ctx = cv.getContext('2d');
+    const img = ctx.createImageData(cv.width, 252);
+    const cols = {'.': hex(css('--no-rule')), R: hex(css('--cell-r')), G: hex(css('--cell-g')), B: hex(css('--cell-b'))};
+    r.strip.forEach((gs, xi) => order.forEach((c, yi) => { const p = (yi * cv.width + xi) * 4, v = cols[gs[c]]; img.data[p] = v[0]; img.data[p + 1] = v[1]; img.data[p + 2] = v[2]; img.data[p + 3] = 255; }));
+    ctx.putImageData(img, 0, 0);
+  };
+  drawStrip(); redraws.push(drawStrip);
+  // The strip spans the full width; inset it to line up with the charts' plot area.
+  cv.style.marginLeft = (padL / W * 100) + '%'; cv.style.width = ((W - padL - padR) / W * 100) + '%';
+
+  // Hover: crosshair + tooltip across the panel.
+  const tip = document.createElement('div'); tip.className = 'tip'; tip.hidden = true; el.style.position = 'relative'; el.appendChild(tip);
+  const xh = c2.querySelector('.xh');
+  el.addEventListener('pointermove', e => {
+    const svgEl = c2.querySelector('svg'), rect = svgEl.getBoundingClientRect();
+    const vx = (e.clientX - rect.left) / rect.width * W;
+    if (vx < padL || vx > W - padR) { tip.hidden = true; xh.setAttribute('visibility', 'hidden'); return; }
+    const tv = (vx - padL) / (W - padL - padR) * t[t.length - 1];
+    let i = 0; while (i < t.length - 1 && t[i] < tv) i++;
+    xh.setAttribute('x1', x(t[i])); xh.setAttribute('x2', x(t[i])); xh.setAttribute('visibility', 'visible');
+    tip.innerHTML = 'tick ' + fmt(t[i]) + '<br>alive ' + (s.pop[i] * 100).toFixed(0) + '% · R ' + (s.colors[0][i] * 100).toFixed(0) + ' G ' + (s.colors[1][i] * 100).toFixed(0) + ' B ' + (s.colors[2][i] * 100).toFixed(0) + '<br>mean genome ' + s.meanGenome[i].toFixed(1) + ' · consensus ' + s.consensusSize[i] + '<br>distinct genomes ' + fmt(s.distinctGenomes[i]) + ' · founders ' + s.foundersAlive[i];
+    const er = el.getBoundingClientRect();
+    tip.style.left = Math.min(Math.max(e.clientX - er.left, 120), er.width - 120) + 'px';
+    tip.style.top = (rect.top - er.top) + 'px'; tip.hidden = false;
+  });
+  el.addEventListener('pointerleave', () => { tip.hidden = true; xh.setAttribute('visibility', 'hidden'); });
+  return el;
+}
+function niceTicks(max) { const step = [10000, 20000, 50000, 100000, 200000].find(s => max / s <= 6) || 500000; const out = []; for (let v = 0; v <= max; v += step) out.push(v); return out; }
+function hex(c) { const d = document.createElement('div'); d.style.color = c; document.body.appendChild(d); const m = getComputedStyle(d).color.match(/\d+/g).map(Number); d.remove(); return m; }
+const redraws = [];
+for (const r of DATA.runs) $('runs').appendChild(panel(r));
+
+// ── Final consensus comparison ───────────────────────────────────────────────
+function drawFinal() {
+  drawStrips($('finalStrips'), DATA.runs.map(r => ({seed: r.seed, g: r.strip[r.strip.length - 1]})),
+    order.filter(c => DATA.runs.some(r => (r.finalEnc[c] || 0) > 0.001)));
+  if (DATA.symmetry) {
+    const can = DATA.symmetry.canonical;
+    drawStrips($('canonStrips'), can, order.filter(c => can.some(x => x.g[c] !== '.')));
+  }
+}
+function drawStrips(cv, rows, active) {
+  const runs = rows;
+  const cell = 14, gap = 3, lab = 64;
+  const cssW = cv.parentElement.clientWidth;
+  const cw = Math.max(3, Math.min(cell, Math.floor((cssW - lab) / active.length)));
+  const dpr = window.devicePixelRatio || 1;
+  cv.style.width = (lab + cw * active.length) + 'px';
+  cv.style.height = (runs.length * (cell + gap)) + 'px';
+  cv.width = (lab + cw * active.length) * dpr; cv.height = runs.length * (cell + gap) * dpr;
+  const ctx = cv.getContext('2d'); ctx.scale(dpr, dpr);
+  ctx.font = '500 11px ' + css('--f-mono'); ctx.textBaseline = 'middle';
+  runs.forEach((r, ri) => {
+    const last = r.g, y = ri * (cell + gap);
+    ctx.fillStyle = css('--ink-2'); ctx.fillText('Seed ' + r.seed, 0, y + cell / 2);
+    active.forEach((c, ci) => { ctx.fillStyle = SYMCOL(last[c]); ctx.fillRect(lab + ci * cw, y, Math.max(1, cw - 1), cell); });
+  });
+  cv.setAttribute('role', 'img');
+  cv.setAttribute('aria-label', 'Final consensus outputs for ' + active.length + ' conditions across ' + runs.length + ' runs');
+}
+drawFinal(); redraws.push(drawFinal);
+if (DATA.symmetry) {
+  const pct = (a, b) => b ? Math.round(a / b * 100) + '%' : '—';
+  const lab = l => esc(l.replace(' full', ''));
+  $('pairTable').innerHTML = '<thead><tr><th>Pair</th><th class="l">Final colours</th><th>Rules in either</th><th>Match as run</th><th>Match relabeled</th><th class="l">Best colour map</th></tr></thead><tbody>' +
+    DATA.symmetry.pairs.map(p => '<tr><td>Seed ' + p.a + ' vs ' + p.b + '</td><td class="l">' + chip(lab(p.labelA)) + ' vs ' + chip(lab(p.labelB)) + '</td><td>' + p.best.union + '</td><td>' + p.raw.same + ' (' + pct(p.raw.same, p.raw.union) + ')</td><td><b>' + p.best.same + ' (' + pct(p.best.same, p.best.union) + ')</b></td><td class="l mono">RGB→' + p.best.perm + '</td></tr>').join('') + '</tbody>';
+  const rules = DATA.symmetry.rules.filter(r => r.runs >= 3);
+  $('ruleTable').innerHTML = '<thead><tr><th class="l">Rule (relabeled)</th><th class="l">Type</th><th>Runs with it</th></tr></thead><tbody>' +
+    rules.map(r => { const self = r.text[0], flip = self !== r.out; return '<tr><td class="l mono">' + esc(r.text) + '</td><td class="l">' + (flip ? 'flip' : 'stay') + '</td><td>' + r.runs + ' of 7</td></tr>'; }).join('') + '</tbody>';
+}
+
+// Redraw canvases when the theme flips or the width changes.
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => redraws.forEach(f => f()));
+new MutationObserver(() => redraws.forEach(f => f())).observe(document.documentElement, {attributes: true, attributeFilter: ['data-theme']});
+let rz; addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(drawFinal, 150); });
+</script>
