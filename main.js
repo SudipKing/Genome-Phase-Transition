@@ -59,6 +59,11 @@ function exportGenealogy() {
     if (hexca) hexca.exportGenealogy();
 }
 
+function exportLineageGenomes() {
+    const hexca = gameEngine.entities.find((entity) => entity instanceof HexCA);
+    if (hexca) hexca.exportLineageGenomes(currentStats);
+}
+
 window.addEventListener('keydown', (e) => {
     const t = e.target.tagName;
     if (t === 'INPUT' || t === 'SELECT' || t === 'TEXTAREA') return;

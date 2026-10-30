@@ -49,8 +49,8 @@ class HexCA {
         this.organismId = new Int32Array(this.N).fill(-1);
         this.parentId = new Int32Array(this.N).fill(-1);
         this.nextOrganismId = 0;
-        // Permanent records preserve ancestry after an organism dies or its cell is reused.
-        this.organismHistory = [];
+        // Permanent records preserve ancestry and genomes after an organism dies or its cell is reused.
+        this.log = new OrganismLog(this.ncond);
         this.nextColor  = new Int8Array(this.N).fill(-1);
         this.prevColor  = new Int8Array(this.N).fill(-1);
         this.birthTick  = new Int32Array(this.N);
@@ -271,16 +271,13 @@ class HexCA {
                     this.ancestorId[i] = this.nextAncestorId++;
                     this.organismId[i] = this.nextOrganismId++;
                     this.parentId[i] = -1;
-                    this.organismHistory.push({
-                        id: this.organismId[i], parentId: -1, founderId: this.ancestorId[i],
-                        birthTick: 0, deathTick: null
-                    });
                     this.mtf[i * n] = c;
                     let slot = 1;
                     for (let ci = 0; ci < n; ci++) if (ci !== c) this.mtf[i * n + slot++] = ci;
                     const {genome, size} = this._generateRandomGenome();
                     this.genomes.set(genome, i * ncond);
                     this.genomeSize[i] = size;
+                    this.log.add(this.organismId[i], -1, this.ancestorId[i], 0, genome, null);
                 }
             }
         }
@@ -507,10 +504,8 @@ class HexCA {
             this.ancestorId[targetKey] = this.ancestorId[i];
             this.parentId[targetKey] = this.organismId[i];
             this.organismId[targetKey] = this.nextOrganismId++;
-            this.organismHistory.push({
-                id: this.organismId[targetKey], parentId: this.organismId[i],
-                founderId: this.ancestorId[targetKey], birthTick: this.tick, deathTick: null
-            });
+            this.log.add(this.organismId[targetKey], this.organismId[i], this.ancestorId[targetKey], this.tick,
+                genomes.subarray(base, base + ncond), genomes.subarray(iBase, iBase + ncond));
             birthTick[targetKey]  = this.tick;
             counter[targetKey]    = 0;
             counter[i]            = 0;
@@ -580,26 +575,30 @@ class HexCA {
 
     // Record the first death only. The permanent history is independent of cell reuse.
     _recordOrganismDeath(cellIndex) {
-        const id = this.organismId[cellIndex];
-        if (id < 0) return;
-        const record = this.organismHistory[id];
-        if (record && record.deathTick === null) record.deathTick = this.tick;
+        this.log.recordDeath(this.organismId[cellIndex], this.tick);
     }
 
     // Export the complete parent graph, including organisms that are no longer alive.
     exportGenealogy() {
+        const log = this.log;
         const childrenByParent = new Map();
-        for (const organism of this.organismHistory) {
-            if (organism.parentId < 0) continue;
-            if (!childrenByParent.has(organism.parentId)) childrenByParent.set(organism.parentId, []);
-            childrenByParent.get(organism.parentId).push(organism.id);
+        for (let id = 0; id < log.length; id++) {
+            const p = log.parent[id];
+            if (p < 0) continue;
+            if (!childrenByParent.has(p)) childrenByParent.set(p, []);
+            childrenByParent.get(p).push(id);
         }
 
-        const organisms = this.organismHistory.map((organism) => ({
-            ...organism,
-            children: childrenByParent.get(organism.id) || [],
-            aliveAtExport: organism.deathTick === null
-        }));
+        const organisms = [];
+        for (let id = 0; id < log.length; id++) {
+            const deathTick = log.death[id] === -1 ? null : log.death[id];
+            organisms.push({
+                id, parentId: log.parent[id], founderId: log.founder[id],
+                birthTick: log.birth[id], deathTick,
+                children: childrenByParent.get(id) || [],
+                aliveAtExport: deathTick === null
+            });
+        }
         const data = {
             format: "hex-ca-genealogy-v1",
             exportedAtTick: this.tick,
@@ -626,6 +625,44 @@ class HexCA {
         link.remove();
         URL.revokeObjectURL(url);
         return data;
+    }
+
+    // Export genealogy and every organism's genome (as changes from its parent) in one
+    // compact binary file for lineage-explorer.html. `stats` (optional) adds the sampled
+    // time series so the explorer can line phases up with lineages.
+    exportLineageGenomes(stats) {
+        const extra = {
+            exportedAtTick: this.tick,
+            n: this.n,
+            conditions: this.conditions,
+            useHistory: this.useHistory,
+            params: Object.assign({}, PARAMETERS),
+            liveAtExport: Array.from(this.organismId.filter((id, i) => this.color[i] !== -1 && id >= 0)),
+        };
+        if (stats) {
+            const q = arr => Array.from(arr, v => Math.round(v * 1e4) / 1e4);
+            extra.series = {
+                reportingPeriod: PARAMETERS.reportingPeriod,
+                population: q(stats.popSeries),
+                colors: stats.colorSeries.map(q),
+                meanGenomeSize: q(stats.genomeSeries),
+                births: q(stats.birthSeries),
+                ruleDeaths: q(stats.ruleDeathSeries),
+                velocity: q(stats.rs.velocitySeries),
+                encounterFreq: stats.rs.encFreq.map(q),
+            };
+        }
+        const buf = this.log.toArrayBuffer(extra);
+        const blob = new Blob([buf], {type: "application/octet-stream"});
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = "hex-ca-lineage-genomes-tick-" + this.tick + ".hxlg";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+        return buf;
     }
 
     // ── Draw ──────────────────────────────────────────────────────────────────
