@@ -7,6 +7,7 @@
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const runStorage = require('./storage/local.js');
 
 const args = {};
 for (let i = 2; i < process.argv.length; i++) {
@@ -19,7 +20,7 @@ for (let i = 2; i < process.argv.length; i++) {
 }
 const repo = path.resolve(args.repo || path.join(__dirname, '..'));
 const seed = parseInt(args.seed || '1');
-const ticks = parseInt(args.ticks || '100000');
+const ticks = parseInt(args.ticks || '50000');
 const out = path.resolve(args.out || path.join(__dirname, 'runs', 's' + seed));
 const overrides = args.params ? JSON.parse(args.params) : {};
 fs.mkdirSync(out, {recursive: true});
@@ -79,8 +80,11 @@ const historyTicks = args.historyTicks !== undefined ? parseInt(args.historyTick
 let historyCapped = false;
 
 const samples = [];
-const settle = parseInt(args.settle || '40');
-let fullStreak = 0;
+const quietThreshold = Number(args.quietThreshold || 10);
+const stableSamples = Number(args.stableSamples || 5);
+let quietStreak = 0;
+let stopReason = 'max-ticks';
+const storedRun = runStorage.createRun(out);
 function saveSamples() {
     fs.writeFileSync(path.join(out, 'samples.json'), JSON.stringify({seed, ticks: hexca.tick, params: P, conditions: hexca.conditions, samples, dominantGenomes}));
 }
@@ -107,13 +111,22 @@ for (let t = 1; t <= ticks; t++) {
         founderCounts.set(f, (founderCounts.get(f) || 0) + 1);
     }
     const gSorted = [...genomeCounts.entries()].sort((a, b) => b[1] - a[1]);
+    const genomeSnapshot = gSorted.map(([key, count]) => [genomeString(key), count]);
+    const last = a => a.length ? a[a.length - 1] : null;
+    const sampleBirths = last(stats.birthSeries) || 0;
+    const sampleRuleDeaths = last(stats.ruleDeathSeries) || 0;
+    const sampleRandomDeaths = last(stats.randomDeathSeries) || 0;
+    const sampleTotalDeaths = sampleRuleDeaths + sampleRandomDeaths;
+    runStorage.saveSnapshot(storedRun, {
+        tick: hexca.tick, population: alive, distinctGenomes: genomeSnapshot.length,
+        genomes: genomeSnapshot
+    });
     const fSorted = [...founderCounts.entries()].sort((a, b) => b[1] - a[1]);
     let simpson = 0;
     for (const [, c] of genomeCounts) simpson += (c / alive) ** 2;
     const domStr = gSorted.length ? genomeString(gSorted[0][0]) : '';
     if (domStr && !(domStr in dominantGenomes)) dominantGenomes[domStr] = hexca.tick;
 
-    const last = a => a.length ? a[a.length - 1] : null;
     const rs = stats.rs;
 
     // Nearly every cell's genome is unique, so describe the population by its consensus:
@@ -142,7 +155,9 @@ for (let t = 1; t <= ticks; t++) {
         colors: stats.colorSeries.map(s => last(s)),
         meanGenome: last(stats.genomeSeries),
         births: last(stats.birthSeries),
-        ruleDeaths: last(stats.ruleDeathSeries),
+        ruleDeaths: sampleRuleDeaths,
+        randomDeaths: sampleRandomDeaths,
+        totalDeaths: sampleTotalDeaths,
         cluster: last(stats.clusterSeries),
         meanAge: last(stats.meanAgeSeries),
         velocity: last(rs.velocitySeries),
@@ -169,12 +184,16 @@ for (let t = 1; t <= ticks; t++) {
         P: Prow,                                              // per-mille, ncond × (n+1)
         enc: enc ? Array.from(enc, v => +v.toFixed(5)) : null, // encounters per cell-tick
     });
-    if (alive === 0) { console.log(`seed ${seed}: extinct at tick ${hexca.tick}`); break; }
+    if (alive === 0) { stopReason = 'extinction'; console.log(`seed ${seed}: extinct at tick ${hexca.tick}`); break; }
     // Checkpoint so a stopped run still leaves data behind.
     if (samples.length % 10 === 0) saveSamples();
-    // The filled grid is the final phase; stop once it has held for --settle samples.
-    fullStreak = alive / N >= 0.99 ? fullStreak + 1 : 0;
-    if (fullStreak >= settle) { console.log(`seed ${seed}: grid full for ${settle} samples, stopping at tick ${hexca.tick}`); break; }
+    // Stop only after births and all deaths stay below the threshold for several samples.
+    quietStreak = sampleBirths < quietThreshold && sampleTotalDeaths < quietThreshold ? quietStreak + 1 : 0;
+    if (quietStreak >= stableSamples) {
+        stopReason = 'births-and-deaths-below-threshold';
+        console.log(`seed ${seed}: births and deaths below ${quietThreshold} for ${stableSamples} samples; stopping at tick ${hexca.tick}`);
+        break;
+    }
     if (hexca.tick % (period * 20) === 0) {
         const s = samples[samples.length - 1];
         console.log(`seed ${seed} t=${hexca.tick} pop=${s.pop.toFixed(2)} genome=${s.meanGenome.toFixed(1)} distinct=${s.distinctGenomes} dom=${s.domGenomeShare.toFixed(2)} founders=${s.foundersAlive} ${((Date.now() - t0) / 1000).toFixed(0)}s`);
@@ -182,6 +201,11 @@ for (let t = 1; t <= ticks; t++) {
 }
 
 saveSamples();
+runStorage.completeRun(storedRun, {
+    format: 'hex-ca-run-v1', seed, ticks: hexca.tick, stopReason,
+    quietThreshold, stableSamples, params: P, conditions: hexca.conditions,
+    snapshotFile: 'genome-snapshots.jsonl', sampleCount: samples.length
+});
 
 // Real genealogy export path (hexca.exportGenealogy), captured through the Blob stub.
 if (args.genealogy) {
