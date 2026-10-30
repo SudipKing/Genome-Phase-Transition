@@ -7,6 +7,7 @@
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const runStorage = require('./storage/local.js');
 
 const args = {};
 for (let i = 2; i < process.argv.length; i++) {
@@ -83,8 +84,7 @@ const quietThreshold = Number(args.quietThreshold || 10);
 const stableSamples = Number(args.stableSamples || 5);
 let quietStreak = 0;
 let stopReason = 'max-ticks';
-const snapshotPath = path.join(out, 'genome-snapshots.jsonl');
-fs.writeFileSync(snapshotPath, '');
+const storedRun = runStorage.createRun(out);
 function saveSamples() {
     fs.writeFileSync(path.join(out, 'samples.json'), JSON.stringify({seed, ticks: hexca.tick, params: P, conditions: hexca.conditions, samples, dominantGenomes}));
 }
@@ -184,7 +184,7 @@ for (let t = 1; t <= ticks; t++) {
         P: Prow,                                              // per-mille, ncond × (n+1)
         enc: enc ? Array.from(enc, v => +v.toFixed(5)) : null, // encounters per cell-tick
     });
-    if (alive === 0) { console.log(`seed ${seed}: extinct at tick ${hexca.tick}`); break; }
+    if (alive === 0) { stopReason = 'extinction'; console.log(`seed ${seed}: extinct at tick ${hexca.tick}`); break; }
     // Checkpoint so a stopped run still leaves data behind.
     if (samples.length % 10 === 0) saveSamples();
     // Stop only after births and all deaths stay below the threshold for several samples.
@@ -194,7 +194,6 @@ for (let t = 1; t <= ticks; t++) {
         console.log(`seed ${seed}: births and deaths below ${quietThreshold} for ${stableSamples} samples; stopping at tick ${hexca.tick}`);
         break;
     }
-    if (alive === 0) stopReason = 'extinction';
     if (hexca.tick % (period * 20) === 0) {
         const s = samples[samples.length - 1];
         console.log(`seed ${seed} t=${hexca.tick} pop=${s.pop.toFixed(2)} genome=${s.meanGenome.toFixed(1)} distinct=${s.distinctGenomes} dom=${s.domGenomeShare.toFixed(2)} founders=${s.foundersAlive} ${((Date.now() - t0) / 1000).toFixed(0)}s`);
@@ -202,11 +201,11 @@ for (let t = 1; t <= ticks; t++) {
 }
 
 saveSamples();
-fs.writeFileSync(path.join(out, 'run.json'), JSON.stringify({
+runStorage.completeRun(storedRun, {
     format: 'hex-ca-run-v1', seed, ticks: hexca.tick, stopReason,
     quietThreshold, stableSamples, params: P, conditions: hexca.conditions,
     snapshotFile: 'genome-snapshots.jsonl', sampleCount: samples.length
-}, null, 2));
+});
 
 // Real genealogy export path (hexca.exportGenealogy), captured through the Blob stub.
 if (args.genealogy) {
