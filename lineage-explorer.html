@@ -1,0 +1,515 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hex CA Lineage Explorer</title>
+<style>
+/* Same palette as genealogy.html, plus colours for the three cell states. */
+:root{color-scheme:dark;--bg:#10131a;--panel:#191e29;--line:#30394a;--grid:#232a37;--text:#edf1f7;--muted:#aab5c6;--faint:#7d889a;--accent:#76d6c4;--warn:#f0a640;
+  --cell0:#e66767;--cell1:#2fbf87;--cell2:#4a8fe7;--cell3:#e6c547;--cell4:#b07be8;--cell5:#e0e0e0;--norule:#2a3140}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:1240px;margin:auto;padding:28px 20px 60px;display:flex;flex-direction:column;gap:18px}
+h1,h2,h3{line-height:1.2;margin:0}h1{font-size:clamp(1.6rem,3.5vw,2.3rem)}h2{font-size:1.12rem}h3{font-size:.98rem}
+p{color:var(--muted);margin:0;max-width:78ch}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;display:flex;flex-direction:column;gap:12px;min-width:0}
+.controls{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+.controls input,.controls select,.controls button{font:inherit;border-radius:8px;border:1px solid var(--line);padding:8px 11px;background:#111722;color:var(--text)}
+button{cursor:pointer}button:hover{border-color:var(--accent)}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.status{color:var(--accent);min-height:1.5em}
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.metric{background:#111722;border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.metric strong{display:block;font-size:1.35rem;font-variant-numeric:tabular-nums}.metric span{font-size:.82rem;color:var(--muted)}
+.lab{font:500 11px ui-monospace,Consolas,monospace;text-transform:uppercase;letter-spacing:.06em;color:var(--faint)}
+.stack{display:flex;flex-direction:column;gap:4px;position:relative}
+canvas{display:block;width:100%;background:#10151f;border:1px solid var(--line);border-radius:8px;touch-action:none}
+.two{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:18px}
+@media (max-width:900px){.two{grid-template-columns:minmax(0,1fr)}}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:.82rem;color:var(--muted);align-items:center}
+.sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+.tip{position:absolute;pointer-events:none;background:#edf1f7;color:#10131a;font:12px/1.45 ui-monospace,Consolas,monospace;padding:6px 9px;border-radius:6px;white-space:nowrap;z-index:5;font-variant-numeric:tabular-nums;box-shadow:0 4px 14px #0008}
+.tip[hidden]{display:none}
+.tablewrap{overflow:auto;max-height:340px;border:1px solid var(--line);border-radius:10px}
+table{border-collapse:collapse;width:100%;font-size:.86rem;font-variant-numeric:tabular-nums}
+th,td{text-align:left;border-bottom:1px solid var(--line);padding:7px 10px;white-space:nowrap}
+th{position:sticky;top:0;background:var(--panel);color:var(--muted);font-weight:500}
+tbody tr{cursor:pointer}tbody tr:hover{background:#222b38}tr.sel{background:#253141}
+.mono{font-family:ui-monospace,Consolas,monospace;font-size:.85em}
+.tag{display:inline-block;font:500 11px ui-monospace,Consolas,monospace;padding:2px 6px;border-radius:4px;background:#1d3a36;color:var(--accent)}
+.tag.off{background:#2a2f3a;color:var(--faint)}
+.empty{color:var(--faint);font-size:.9rem}
+.hint{font-size:.85rem;color:var(--faint)}
+.kv td{white-space:normal}.kv td:first-child{color:var(--muted);width:45%}
+</style>
+</head>
+<body><main>
+<header style="display:flex;flex-direction:column;gap:8px">
+  <h1>Hex CA Lineage Explorer</h1>
+  <p>Links the family tree to the genomes. Load a <span class="mono">.hxlg</span> file from <b>Export lineage + genomes</b> in the simulator, or from <span class="mono">analysis/run.js --lineageGenomes</span>. Everything is computed locally in this browser.</p>
+</header>
+
+<section class="panel">
+  <div class="controls">
+    <label for="file">Lineage + genomes file</label><input id="file" type="file" accept=".hxlg,application/octet-stream">
+    <label for="threshold">Major clade ≥</label>
+    <select id="threshold"><option value="0.02">2%</option><option value="0.05">5%</option><option value="0.1" selected>10%</option><option value="0.2">20%</option></select>
+  </div>
+  <div id="status" class="status" role="status"></div>
+  <div id="metrics" class="metrics"><div class="metric"><strong>—</strong><span>Load a file to begin</span></div></div>
+</section>
+
+<section class="panel" id="timelinePanel">
+  <h2>Timeline</h2>
+  <p>All four charts share the time axis. <b>Click</b> any chart to choose the tick used by the tree and the distance plot below; <b>click a band</b> in the lineage chart to inspect that clade.</p>
+  <div class="legend" id="phaseLegend"></div>
+  <div class="stack" id="timeline">
+    <div class="lab">Living cells by colour · shaded strips mark phases</div><canvas id="cvPop" height="110"></canvas>
+    <div class="lab">Lineages (Muller plot) · share of living cells in each major clade, nested by ancestry · colour = genome · grey = smaller lineages · ▼ = clade went extinct</div><canvas id="cvMuller" height="230"></canvas>
+    <div class="lab">Time to most recent common ancestor of everyone alive (ticks) · a sudden drop = one branch replaced all others</div><canvas id="cvTmrca" height="90"></canvas>
+    <div class="lab">Births (teal) and deaths (orange) per tick</div><canvas id="cvBirths" height="80"></canvas>
+    <div class="tip" id="tip" hidden></div>
+  </div>
+</section>
+
+<section class="two">
+  <div class="panel">
+    <h2 id="treeTitle">Family tree of the living population</h2>
+    <p class="hint">A random sample of organisms alive at the chosen tick and every ancestor they share, with single-child chains collapsed. Horizontal position is birth tick. Scroll to zoom, drag to pan, double-click to reset. Branch colour = major clade.</p>
+    <div class="stack"><canvas id="cvTree" height="460" aria-label="Family tree of the sampled living population"></canvas><div class="tip" id="treeTip" hidden></div></div>
+    <div class="controls"><label for="treeSize">Sample</label><select id="treeSize"><option>100</option><option selected>300</option><option>800</option></select><button id="treeReset" type="button">Reset view</button></div>
+  </div>
+  <div class="panel">
+    <h2 id="cladeTitle">Clade</h2>
+    <div id="cladeBody" class="empty">Click a band in the lineage chart or a row in the table below.</div>
+  </div>
+</section>
+
+<section class="two">
+  <div class="panel">
+    <h2>Lineage distance vs genome distance</h2>
+    <p class="hint">Pairs of organisms alive at the chosen tick. x = ticks back to their common ancestor; y = rules that differ between their genomes. Grey: all 252 conditions. Teal: only conditions cells actually meet at that tick. Lines are averages per bin. If genomes drift neutrally, differences keep growing with time apart; if selection holds the used rules in place, the teal line stays flat.</p>
+    <div class="stack"><canvas id="cvScatter" height="300" aria-label="Lineage distance against genome distance"></canvas><div class="tip" id="scTip" hidden></div></div>
+  </div>
+  <div class="panel">
+    <h2>Extinctions and phase changes</h2>
+    <p class="hint">Extinction events: every major clade (one that held ≥10% of living cells) lost at the same tick counts as one event, since nested clades on a branch die together. Click a row to jump there and inspect the largest clade lost.</p>
+    <div class="tablewrap"><table><thead><tr><th>Tick</th><th>Clades lost</th><th>Largest held</th><th>Nearest phase change</th><th>Gap</th></tr></thead><tbody id="events"><tr><td colspan="5" class="empty">No data yet.</td></tr></tbody></table></div>
+    <div id="eventSummary" class="hint"></div>
+  </div>
+</section>
+</main>
+
+<script src="./organismlog.js"></script>
+<script src="./lineage-analysis.js"></script>
+<script>
+(() => {
+const $ = id => document.getElementById(id);
+const A = LineageAnalysis;
+const fmt = n => n === null || n === undefined ? '—' : Number(n).toLocaleString('en-US');
+const pct = f => (f * 100).toFixed(f < 0.1 ? 1 : 0) + '%';
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const COLOR_NAMES = ['red', 'green', 'blue', 'yellow', 'purple', 'white'];
+const S = {d: null, an: null, bands: null, colors: null, phases: [], tick: null, clade: -1};
+
+// ── Colours from genomes ─────────────────────────────────────────────────────
+// Each clade's founding genome is projected to 2-D with a fixed random projection and
+// shown as hue/chroma at constant lightness, so similar genomes get similar colours.
+function oklchToHex(L, C, h) {
+  const a = C * Math.cos(h), b = C * Math.sin(h);
+  const l_ = L + 0.3963377774 * a + 0.2158037573 * b, m_ = L - 0.1055613458 * a - 0.0638541728 * b, s_ = L - 0.0894841775 * a - 1.2914855480 * b;
+  const l = l_ ** 3, m = m_ ** 3, s = s_ ** 3;
+  const rgb = [4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s, -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s, -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s];
+  return '#' + rgb.map(v => { v = v <= 0.0031308 ? 12.92 * v : 1.055 * Math.pow(Math.max(v, 0), 1 / 2.4) - 0.055; return Math.round(Math.min(1, Math.max(0, v)) * 255).toString(16).padStart(2, '0'); }).join('');
+}
+function genomeColors(genomes, ncond, nOut) {
+  let s = 0x9e3779b9;
+  const rnd = () => { s = (s + 0x6D2B79F5) | 0; let x = Math.imul(s ^ (s >>> 15), 1 | s); x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x; return ((x ^ (x >>> 14)) >>> 0) / 4294967296; };
+  const P = Float32Array.from({length: 2 * ncond * nOut}, () => Math.sqrt(-2 * Math.log(rnd() || 1e-9)) * Math.cos(2 * Math.PI * rnd()));
+  const pts = genomes.map(g => { let x = 0, y = 0; for (let c = 0; c < ncond; c++) { const o = (c * nOut + g[c] + 1) * 2; x += P[o]; y += P[o + 1]; } return [x, y]; });
+  const mx = pts.reduce((a, p) => a + p[0], 0) / (pts.length || 1), my = pts.reduce((a, p) => a + p[1], 0) / (pts.length || 1);
+  const r = Math.sqrt(pts.reduce((a, p) => a + (p[0] - mx) ** 2 + (p[1] - my) ** 2, 0) / (pts.length || 1)) || 1;
+  return pts.map(([x, y]) => { const dx = (x - mx) / r, dy = (y - my) / r; const rad = Math.min(1.6, Math.hypot(dx, dy)); return oklchToHex(0.72, 0.05 + 0.07 * rad, Math.atan2(dy, dx)); });
+}
+
+// ── Phases from the stats series ─────────────────────────────────────────────
+// Same rule as analysis/analyze.js: colours above 8% of living cells, plus "full" at
+// >= 95% of the grid; stretches shorter than 5 samples merge into a neighbour.
+function phasesOf(series) {
+  if (!series) return [];
+  const T = series.population.length, names = 'RGBYPW';
+  const lab = k => series.population[k] < 0.01 ? 'extinct' : series.colors.map((c, i) => c[k] > 0.08 ? names[i] : '').join('') + (series.population[k] >= 0.95 ? ' full' : '');
+  let ph = [];
+  for (let k = 0; k < T; k++) { const l = lab(k); if (ph.length && ph[ph.length - 1].label === l) ph[ph.length - 1].end = k; else ph.push({label: l, start: k, end: k}); }
+  let changed = true;
+  while (changed && ph.length > 1) {
+    changed = false;
+    const k = ph.findIndex(p => p.end - p.start + 1 < 5);
+    if (k >= 0) { const into = k > 0 ? k - 1 : k + 1; ph[into].start = Math.min(ph[into].start, ph[k].start); ph[into].end = Math.max(ph[into].end, ph[k].end); ph.splice(k, 1); changed = true; }
+    for (let j = ph.length - 1; j > 0; j--) if (ph[j].label === ph[j - 1].label) { ph[j - 1].end = ph[j].end; ph.splice(j, 1); changed = true; }
+  }
+  const P = series.reportingPeriod;
+  return ph.map(p => ({label: p.label, startTick: (p.start + 1) * P, endTick: (p.end + 1) * P}));
+}
+
+// ── Load ─────────────────────────────────────────────────────────────────────
+$('file').addEventListener('change', async e => {
+  const f = e.target.files[0]; if (!f) return;
+  $('status').textContent = 'Reading ' + f.name + ' (' + (f.size / 1e6).toFixed(1) + ' MB)…';
+  try {
+    const buf = await f.arrayBuffer();
+    S.d = OrganismLog.parse(buf);
+    await analyse();
+  } catch (err) { S.d = null; $('status').textContent = 'Could not load file: ' + err.message; }
+});
+$('threshold').addEventListener('change', () => { if (S.d) analyse(); });
+
+async function analyse() {
+  const d = S.d, h = d.header;
+  $('status').textContent = 'Analysing ' + fmt(h.organisms) + ' organisms… (large runs take a few seconds)';
+  await new Promise(r => setTimeout(r, 30));
+  const t0 = performance.now();
+  let times = A.sampleTicks(d);
+  if (times.length > 160) { const step = Math.ceil(times.length / 160); times = times.filter((_, i) => (i + 1) % step === 0 || i === times.length - 1); }
+  S.an = A.analyzeClades(d, times, {threshold: +$('threshold').value});
+  S.bands = A.mullerLayout(S.an);
+  const nOut = (h.n || 3) + 1;
+  S.colors = genomeColors(S.an.clades.map(c => d.genomeOf(c.id)), h.ncond, nOut);
+  S.phases = phasesOf(h.series);
+  S.tick = times[times.length - 1];
+  S.clade = -1;
+  renderMetrics(); renderPhaseLegend(); drawTimeline(); renderEvents(); renderTree(true); renderScatter(); renderClade();
+  $('status').textContent = 'Loaded ' + fmt(h.organisms) + ' organisms to tick ' + fmt(h.exportedAtTick) + ' · ' + S.an.clades.length + ' major clades · analysed in ' + ((performance.now() - t0) / 1000).toFixed(1) + ' s.';
+}
+
+function renderMetrics() {
+  const d = S.d, h = d.header, an = S.an;
+  const ext = an.clades.filter(c => c.extinctTick !== null).length;
+  const lastT = an.tmrca[an.tmrca.length - 1];
+  const oneFounder = an.times[an.tmrca.findIndex(v => v !== null)];
+  const items = [
+    ['Organisms recorded', fmt(h.organisms)], ['Alive at export', fmt(h.liveAtExport.length)],
+    ['Rule changes per organism', (h.deltas / h.organisms).toFixed(1)], ['File size', (d.parent.buffer.byteLength / 1e6).toFixed(1) + ' MB'],
+    ['Major clades', an.clades.length], ['Of those extinct', ext],
+    ['One founder lineage left at', oneFounder ? 'tick ' + fmt(oneFounder) : 'not yet'], ['Final TMRCA', lastT === null ? '—' : fmt(lastT) + ' ticks'],
+  ];
+  $('metrics').innerHTML = items.map(([l, v]) => '<div class="metric"><strong>' + v + '</strong><span>' + l + '</span></div>').join('');
+}
+function renderPhaseLegend() {
+  $('phaseLegend').innerHTML = S.phases.length ? 'Phases: ' + S.phases.map((p, i) => '<span><i class="sw" style="background:' + phaseFill(i, 0.6) + '"></i>' + p.label + ' · ' + fmt(p.startTick) + '–' + fmt(p.endTick) + '</span>').join('') : '<span>No stats series in this file, so phases are not shown.</span>';
+}
+const phaseFill = (i, a) => i % 2 ? 'rgba(170,181,198,' + (0.07 * a / 0.6) + ')' : 'rgba(118,214,196,' + (0.07 * a / 0.6) + ')';
+
+// ── Canvas helpers ───────────────────────────────────────────────────────────
+function setup(cv) {
+  const dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = cv.height / (cv._dpr || 1);
+  cv._dpr = dpr; cv._w = w; cv._h = h;
+  cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); cv.style.height = h + 'px';
+  const ctx = cv.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, w, h);
+  return ctx;
+}
+const PAD = {l: 46, r: 12};
+const endTick = () => S.d.header.exportedAtTick;
+const tx = (cv, t) => PAD.l + t / endTick() * (cv._w - PAD.l - PAD.r);
+const xt = (cv, x) => Math.max(0, Math.min(endTick(), (x - PAD.l) / (cv._w - PAD.l - PAD.r) * endTick()));
+function phaseStrips(ctx, cv, top, bottom) {
+  S.phases.forEach((p, i) => { ctx.fillStyle = phaseFill(i, 0.6); const x0 = tx(cv, p.startTick - (S.d.header.series?.reportingPeriod || 0)), x1 = tx(cv, p.endTick); ctx.fillRect(x0, top, x1 - x0, bottom - top); });
+}
+function axisY(ctx, cv, top, bottom, max, fmtv, steps = 2) {
+  ctx.font = '10px ui-monospace,Consolas,monospace'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  for (let i = 0; i <= steps; i++) {
+    const v = max * i / steps, y = bottom - (bottom - top) * i / steps;
+    ctx.strokeStyle = css('--grid'); ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(PAD.l, y + .5); ctx.lineTo(cv._w - PAD.r, y + .5); ctx.stroke();
+    ctx.fillStyle = css('--faint'); ctx.fillText(fmtv(v), PAD.l - 6, y);
+  }
+}
+function marker(ctx, cv, top, bottom) {
+  if (S.tick === null) return;
+  const x = tx(cv, S.tick); ctx.strokeStyle = css('--accent'); ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]);
+  ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, bottom); ctx.stroke(); ctx.setLineDash([]);
+}
+
+// ── Timeline charts ──────────────────────────────────────────────────────────
+function drawTimeline() { drawPop(); drawMuller(); drawTmrca(); drawBirths(); }
+
+function drawPop() {
+  const cv = $('cvPop'), ctx = setup(cv), s = S.d.header.series, top = 6, bottom = cv._h - 6;
+  phaseStrips(ctx, cv, top, bottom);
+  if (!s) { ctx.fillStyle = css('--faint'); ctx.fillText('No stats series in this file.', PAD.l + 8, cv._h / 2); return; }
+  axisY(ctx, cv, top, bottom, 1, v => Math.round(v * 100) + '%', 2);
+  const P = s.reportingPeriod, T = s.population.length;
+  let base = new Float32Array(T);
+  s.colors.forEach((col, c) => {
+    ctx.beginPath();
+    for (let k = 0; k < T; k++) ctx.lineTo(tx(cv, (k + 1) * P), bottom - (base[k] + col[k] * s.population[k]) * (bottom - top));
+    for (let k = T - 1; k >= 0; k--) ctx.lineTo(tx(cv, (k + 1) * P), bottom - base[k] * (bottom - top));
+    ctx.closePath(); ctx.fillStyle = css('--cell' + c); ctx.globalAlpha = .88; ctx.fill(); ctx.globalAlpha = 1;
+    for (let k = 0; k < T; k++) base[k] += col[k] * s.population[k];
+  });
+  marker(ctx, cv, top, bottom);
+}
+
+function drawMuller() {
+  const cv = $('cvMuller'), ctx = setup(cv), an = S.an, top = 6, bottom = cv._h - 14;
+  phaseStrips(ctx, cv, top, bottom);
+  // Background = lineages too small to be major clades.
+  ctx.fillStyle = '#2b3240'; ctx.fillRect(PAD.l, top, cv._w - PAD.l - PAD.r, bottom - top);
+  const y = v => bottom - v * (bottom - top);
+  // Parents first so children paint on top of them.
+  const order = an.clades.map((c, j) => j).sort((a, b) => depth(a) - depth(b) || an.clades[a].birth - an.clades[b].birth);
+  for (const j of order) {
+    const b = S.bands[j], c = an.clades[j];
+    ctx.beginPath();
+    an.times.forEach((t, k) => ctx.lineTo(tx(cv, t), y(b.hi[k])));
+    for (let k = an.times.length - 1; k >= 0; k--) ctx.lineTo(tx(cv, an.times[k]), y(b.lo[k]));
+    ctx.closePath(); ctx.fillStyle = S.colors[j]; ctx.fill();
+    ctx.strokeStyle = j === S.clade ? '#ffffff' : "rgba(16,19,26,.35)"; ctx.lineWidth = j === S.clade ? 2 : .4; ctx.stroke();
+  }
+  // Extinction markers for clades that once held >= 10%.
+  ctx.fillStyle = css('--text'); ctx.font = '10px system-ui';
+  an.clades.forEach(c => { if (c.extinctTick !== null && c.peak >= 0.1) { const x = tx(cv, c.extinctTick); ctx.beginPath(); ctx.moveTo(x - 4, bottom + 3); ctx.lineTo(x + 4, bottom + 3); ctx.lineTo(x, bottom + 10); ctx.closePath(); ctx.fill(); } });
+  ctx.font = '10px ui-monospace,Consolas,monospace'; ctx.fillStyle = css('--faint'); ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  ctx.fillText('100%', PAD.l - 6, top + 4); ctx.fillText('0', PAD.l - 6, bottom);
+  marker(ctx, cv, top, bottom);
+}
+const depth = j => { let k = 0; for (let p = S.an.clades[j].parentClade; p >= 0; p = S.an.clades[p].parentClade) k++; return k; };
+
+function drawTmrca() {
+  const cv = $('cvTmrca'), ctx = setup(cv), an = S.an, top = 6, bottom = cv._h - 6;
+  phaseStrips(ctx, cv, top, bottom);
+  const max = Math.max(1, ...an.tmrca.filter(v => v !== null));
+  axisY(ctx, cv, top, bottom, max, v => v >= 1000 ? Math.round(v / 1000) + 'k' : Math.round(v), 2);
+  ctx.strokeStyle = css('--text'); ctx.lineWidth = 2; ctx.beginPath(); let on = false;
+  an.times.forEach((t, k) => { const v = an.tmrca[k]; if (v === null) { on = false; return; } const X = tx(cv, t), Y = bottom - v / max * (bottom - top); on ? ctx.lineTo(X, Y) : ctx.moveTo(X, Y); on = true; });
+  ctx.stroke();
+  if (an.tmrca.every(v => v === null)) { ctx.fillStyle = css('--faint'); ctx.font = '12px system-ui'; ctx.textAlign = 'left'; ctx.fillText('Several founder lineages are still alive, so there is no single common ancestor yet.', PAD.l + 8, cv._h / 2); }
+  marker(ctx, cv, top, bottom);
+}
+
+function drawBirths() {
+  const cv = $('cvBirths'), ctx = setup(cv), d = S.d, top = 6, bottom = cv._h - 16;
+  phaseStrips(ctx, cv, top, bottom);
+  const bins = 240, end = endTick(), w = end / bins;
+  // Scanning millions of organisms is slow, so bin once per loaded file.
+  if (!S.birthBins || S.birthBins.d !== d) {
+    const b = new Float32Array(bins), de = new Float32Array(bins);
+    for (let id = 0; id < d.header.organisms; id++) {
+      if (d.parent[id] >= 0) b[Math.min(bins - 1, Math.floor(d.birth[id] / w))]++;
+      const t = d.death[id]; if (t >= 0) de[Math.min(bins - 1, Math.floor(t / w))]++;
+    }
+    for (let i = 0; i < bins; i++) { b[i] /= w; de[i] /= w; }
+    S.birthBins = {d, b, de};
+  }
+  const {b, de} = S.birthBins;
+  const max = Math.max(1, ...b, ...de);
+  axisY(ctx, cv, top, bottom, max, v => Math.round(v), 1);
+  const line = (arr, col) => { ctx.strokeStyle = col; ctx.lineWidth = 1.6; ctx.beginPath(); arr.forEach((v, i) => ctx.lineTo(tx(cv, (i + .5) * w), bottom - v / max * (bottom - top))); ctx.stroke(); };
+  line(de, '#e67e22'); line(b, '#1abc9c');
+  ctx.fillStyle = css('--faint'); ctx.font = '10px ui-monospace,Consolas,monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  const step = [1000, 2000, 5000, 10000, 20000, 50000, 100000].find(s => end / s <= 8) || 200000;
+  for (let t = 0; t <= end; t += step) ctx.fillText(t >= 1000 ? t / 1000 + 'k' : t, tx(cv, t), cv._h - 3);
+  marker(ctx, cv, top, bottom);
+}
+
+// Hover + click across the timeline.
+const tip = $('tip');
+function cladeAt(cv, x, yPix) {
+  const an = S.an, top = 6, bottom = cv._h - 14, t = xt(cv, x);
+  let k = 0; while (k < an.times.length - 1 && an.times[k] < t) k++;
+  const v = (bottom - yPix) / (bottom - top);
+  let best = -1, bestDepth = -1;
+  an.clades.forEach((c, j) => { const b = S.bands[j]; if (v >= b.lo[k] && v <= b.hi[k] && b.hi[k] > b.lo[k]) { const dp = depth(j); if (dp > bestDepth) { best = j; bestDepth = dp; } } });
+  return {k, j: best};
+}
+for (const id of ['cvPop', 'cvMuller', 'cvTmrca', 'cvBirths']) {
+  const cv = $(id);
+  cv.addEventListener('pointermove', e => {
+    if (!S.an) return;
+    const r = cv.getBoundingClientRect(), x = e.clientX - r.left, t = xt(cv, x), an = S.an;
+    let k = 0; while (k < an.times.length - 1 && an.times[k] < t) k++;
+    const s = S.d.header.series, sk = s ? Math.min(s.population.length - 1, Math.max(0, Math.round(an.times[k] / s.reportingPeriod) - 1)) : -1;
+    let html = 'tick ' + fmt(an.times[k]) + ' · alive ' + fmt(an.living[k]);
+    if (sk >= 0) html += '<br>' + s.colors.map((c, i) => COLOR_NAMES[i][0].toUpperCase() + ' ' + Math.round(c[sk] * 100) + '%').join(' · ') + ' · genome ' + s.meanGenomeSize[sk].toFixed(1);
+    html += '<br>TMRCA ' + (an.tmrca[k] === null ? '— (several founders)' : fmt(an.tmrca[k]) + ' ticks');
+    if (id === 'cvMuller') { const {j} = cladeAt(cv, x, e.clientY - r.top); if (j >= 0) html += '<br>clade #' + an.clades[j].id + ' · ' + pct(an.clades[j].freq[k]) + ' of living'; }
+    const host = $('timeline').getBoundingClientRect();
+    tip.innerHTML = html; tip.hidden = false;
+    tip.style.left = Math.min(e.clientX - host.left + 14, host.width - 260) + 'px'; tip.style.top = (e.clientY - host.top + 14) + 'px';
+  });
+  cv.addEventListener('pointerleave', () => { tip.hidden = true; });
+  cv.addEventListener('click', e => {
+    if (!S.an) return;
+    const r = cv.getBoundingClientRect(), x = e.clientX - r.left;
+    const an = S.an, t = xt(cv, x); let k = 0; while (k < an.times.length - 1 && an.times[k] < t) k++;
+    S.tick = an.times[k];
+    if (id === 'cvMuller') { const {j} = cladeAt(cv, x, e.clientY - r.top); if (j >= 0) S.clade = j; }
+    drawTimeline(); renderTree(true); renderScatter(); renderClade(); renderEventsSel();
+  });
+}
+
+// ── Clade detail ─────────────────────────────────────────────────────────────
+function encounteredAt(t) {
+  const s = S.d.header.series; if (!s || !s.encounterFreq || !s.encounterFreq.length) return null;
+  const k = Math.min(s.encounterFreq.length - 1, Math.max(0, Math.round(t / s.reportingPeriod) - 1));
+  return s.encounterFreq[k].map(v => v > 0.001);
+}
+function renderClade() {
+  const an = S.an, d = S.d;
+  if (S.clade < 0) { $('cladeTitle').textContent = 'Clade'; $('cladeBody').innerHTML = '<div class="empty">Click a band in the lineage chart or a row in the table below.</div>'; return; }
+  const c = an.clades[S.clade], par = c.parentClade >= 0 ? an.clades[c.parentClade] : null;
+  const names = COLOR_NAMES.slice(0, d.header.n || 3);
+  const muts = A.mutationsBetween(d, par ? par.id : -1, c.id);
+  const enc = encounteredAt(c.birth);
+  const genome = d.genomeOf(c.id);
+  const size = genome.reduce((s, v) => s + (v >= 0 ? 1 : 0), 0);
+  $('cladeTitle').innerHTML = '<i class="sw" style="background:' + S.colors[S.clade] + '"></i>Clade #' + c.id;
+  const rows = [
+    ['Founded by organism', '#' + c.id + ' (founder lineage #' + c.founder + ')'], ['Born at tick', fmt(c.birth)],
+    ['Peak share of living cells', pct(c.peak) + ' at tick ' + fmt(c.peakTick)], ['Went extinct', c.extinctTick === null ? 'no, still alive' : 'tick ' + fmt(c.extinctTick)],
+    ['Parent clade', par ? '#' + par.id : 'none (founder level)'], ['Rules in its genome', size],
+  ];
+  let html = '<table class="kv"><tbody>' + rows.map(([a, b]) => '<tr style="cursor:default"><td>' + a + '</td><td>' + b + '</td></tr>').join('') + '</tbody></table>';
+  html += '<div class="lab" style="margin-top:6px">Genome · 252 conditions, top rows fully surrounded</div><canvas id="cvGenome" height="46"></canvas>';
+  if (par) {
+    const encCount = enc ? muts.filter(m => enc[m.cond]).length : null;
+    html += '<div class="lab" style="margin-top:6px">' + muts.length + ' rule changes since parent clade' + (enc ? ' · ' + encCount + ' in conditions cells were meeting then' : '') + '</div>';
+    html += '<div class="tablewrap" style="max-height:200px"><table><tbody>' + (muts.length ? muts.map(m => '<tr style="cursor:default"><td class="mono">' + A.describeRule(d.header.conditions, m.cond, m.to, names) + '</td><td>' + (enc ? (enc[m.cond] ? '<span class="tag">in use</span>' : '<span class="tag off">unused</span>') : '') + '</td></tr>').join('') : '<tr><td class="empty">No rule changes: same genome as its parent clade.</td></tr>') + '</tbody></table></div>';
+  }
+  $('cladeBody').innerHTML = html;
+  drawGenome($('cvGenome'), genome, d.header.conditions);
+}
+function drawGenome(cv, g, conds) {
+  const ctx = setup(cv), n = g.length;
+  const nd = conds.map(c => 6 - c.slice(c.length - (S.d.header.n || 3)).reduce((a, b) => a + b, 0));
+  const order = conds.map((_, i) => i).sort((a, b) => nd[a] - nd[b] || a - b);
+  const cols = 42, rows = Math.ceil(n / cols), cw = (cv._w - 2) / cols, ch = (cv._h - 2) / rows;
+  order.forEach((c, i) => { ctx.fillStyle = g[c] < 0 ? css('--norule') : css('--cell' + g[c]); ctx.fillRect(1 + (i % cols) * cw, 1 + Math.floor(i / cols) * ch, cw - 1, ch - 1); });
+}
+
+// ── Extinctions vs phase changes ─────────────────────────────────────────────
+function renderEvents() {
+  const an = S.an, changes = S.phases.slice(1).map(p => p.startTick);
+  const near = t => changes.reduce((b, c) => b === null || Math.abs(c - t) < Math.abs(b - t) ? c : b, null);
+  const byTick = new Map();
+  an.clades.forEach((c, j) => {
+    if (c.extinctTick === null || c.peak < 0.1) return;
+    const e = byTick.get(c.extinctTick) || {tick: c.extinctTick, clades: 0, largest: -1};
+    e.clades++; if (e.largest < 0 || c.peak > an.clades[e.largest].peak) e.largest = j;
+    byTick.set(c.extinctTick, e);
+  });
+  S.events = [...byTick.values()].sort((a, b) => a.tick - b.tick).map(e => { const n = near(e.tick); return {...e, near: n, gap: n === null ? null : e.tick - n}; });
+  // Sweeps: the common ancestor of everyone alive jumps forward (TMRCA drops sharply).
+  S.sweeps = [];
+  for (let k = 1; k < an.times.length; k++) {
+    const a = an.tmrca[k - 1], b = an.tmrca[k];
+    if (a !== null && b !== null && a - b >= 2000 && a - b >= 0.25 * an.times[k]) S.sweeps.push({tick: an.times[k], founder: an.mrca[k], born: S.d.birth[an.mrca[k]], near: near(an.times[k])});
+  }
+  renderEventsSel();
+  const P = S.d.header.series?.reportingPeriod || 1000, win = 5 * P;
+  const close = S.events.filter(e => e.gap !== null && Math.abs(e.gap) <= win).length;
+  const biggest = S.events.reduce((m, e) => !m || e.clades > m.clades ? e : m, null);
+  let txt = S.events.length ? close + ' of ' + S.events.length + ' extinction events happened within ' + fmt(win) + ' ticks of a phase change (' + changes.length + ' phase change' + (changes.length === 1 ? '' : 's') + ' in this run). Largest: ' + biggest.clades + ' clades at tick ' + fmt(biggest.tick) + '.' : 'No clade that held ≥10% of living cells went extinct.';
+  if (S.sweeps.length) txt += ' Sweeps (one branch replaces all others): ' + S.sweeps.map(s => 'tick ' + fmt(s.tick) + ', by the lineage of organism #' + s.founder + ' born at tick ' + fmt(s.born) + (s.near === null ? '' : ', nearest phase change ' + fmt(s.near))).join('; ') + '.';
+  $('eventSummary').textContent = txt;
+}
+function renderEventsSel() {
+  if (!S.events) return;
+  $('events').innerHTML = S.events.length ? S.events.map(e => '<tr data-j="' + e.largest + '" data-t="' + e.tick + '" class="' + (e.largest === S.clade ? 'sel' : '') + '"><td>' + fmt(e.tick) + '</td><td>' + e.clades + '</td><td><i class="sw" style="background:' + S.colors[e.largest] + '"></i>' + pct(S.an.clades[e.largest].peak) + '</td><td>' + (e.near === null ? '—' : fmt(e.near)) + '</td><td>' + (e.gap === null ? '—' : (e.gap > 0 ? '+' : '') + fmt(e.gap)) + '</td></tr>').join('') : '<tr><td colspan="5" class="empty">None.</td></tr>';
+  $('events').querySelectorAll('tr[data-j]').forEach(tr => tr.addEventListener('click', () => {
+    S.clade = +tr.dataset.j;
+    // Show the tree just before the event, while the lost clade is still alive.
+    const t = +tr.dataset.t, k = S.an.times.indexOf(t);
+    S.tick = S.an.times[Math.max(0, k - 1)];
+    drawTimeline(); renderClade(); renderEventsSel(); renderTree(true); renderScatter();
+  }));
+}
+
+// ── Living tree (zoom + pan) ─────────────────────────────────────────────────
+const T = {tree: null, view: {s: 1, x: 0, y: 0}, cladeOf: null};
+function renderTree(rebuild) {
+  if (!S.d) return;
+  if (rebuild) {
+    T.tree = A.livingTree(S.d, S.tick, {sampleSize: +$('treeSize').value});
+    // Colour each node by the deepest major clade it belongs to.
+    const idx = new Map(S.an.clades.map((c, j) => [c.id, j]));
+    T.cladeOf = new Map();
+    for (const n of T.tree.nodes.values()) { let a = n.id; while (a >= 0 && !idx.has(a)) a = S.d.parent[a]; T.cladeOf.set(n.id, a >= 0 ? idx.get(a) : -1); }
+    T.view = {s: 1, x: 0, y: 0};
+    $('treeTitle').textContent = 'Family tree of the living population · tick ' + fmt(S.tick);
+  }
+  drawTree();
+}
+function drawTree() {
+  const cv = $('cvTree'), ctx = setup(cv), tr = T.tree; if (!tr) return;
+  const L = 30, R = 14, top = 10, bottom = cv._h - 22, end = S.tick, v = T.view;
+  const X = t => (L + t / end * (cv._w - L - R)) * v.s + v.x, Y = yv => (top + (yv + .5) / Math.max(1, tr.leafCount) * (bottom - top)) * v.s + v.y;
+  ctx.font = '10px ui-monospace,Consolas,monospace'; ctx.fillStyle = css('--faint'); ctx.textAlign = 'center';
+  const step = [500, 1000, 2000, 5000, 10000, 20000, 50000].find(s => end / s / v.s <= 8) || 100000;
+  for (let t = 0; t <= end; t += step) { const x = X(t); if (x < L - 5 || x > cv._w) continue; ctx.strokeStyle = css('--grid'); ctx.beginPath(); ctx.moveTo(x + .5, top); ctx.lineTo(x + .5, bottom); ctx.stroke(); ctx.fillText(t >= 1000 ? t / 1000 + 'k' : t, x, cv._h - 6); }
+  ctx.save(); ctx.beginPath(); ctx.rect(0, 0, cv._w, bottom + 4); ctx.clip();
+  const col = id => { const j = T.cladeOf.get(id); return j >= 0 ? S.colors[j] : css('--faint'); };
+  ctx.lineWidth = 1.2;
+  for (const n of tr.nodes.values()) {
+    if (n.parent < 0) continue;
+    const p = tr.nodes.get(n.parent);
+    ctx.strokeStyle = col(n.id); ctx.globalAlpha = S.clade >= 0 && T.cladeOf.get(n.id) !== S.clade ? .35 : 1;
+    ctx.beginPath(); ctx.moveTo(X(p.birth), Y(p.y)); ctx.lineTo(X(p.birth), Y(n.y)); ctx.lineTo(X(n.birth), Y(n.y)); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  for (const n of tr.nodes.values()) if (n.leaf) { ctx.fillStyle = col(n.id); ctx.beginPath(); ctx.arc(X(n.birth), Y(n.y), Math.max(1.5, 2.2 * Math.sqrt(v.s)), 0, 7); ctx.fill(); }
+  ctx.restore();
+  T.X = X; T.Y = Y;
+}
+(() => {
+  const cv = $('cvTree'); let drag = null;
+  cv.addEventListener('wheel', e => { if (!T.tree) return; e.preventDefault(); const r = cv.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top, f = Math.exp(-e.deltaY * 0.0015), v = T.view; const s = Math.min(60, Math.max(1, v.s * f)); v.x = mx - (mx - v.x) * s / v.s; v.y = my - (my - v.y) * s / v.s; v.s = s; drawTree(); }, {passive: false});
+  cv.addEventListener('pointerdown', e => { drag = {x: e.clientX, y: e.clientY, vx: T.view.x, vy: T.view.y}; cv.setPointerCapture(e.pointerId); });
+  cv.addEventListener('pointermove', e => {
+    if (drag) { T.view.x = drag.vx + e.clientX - drag.x; T.view.y = drag.vy + e.clientY - drag.y; drawTree(); return; }
+    if (!T.tree) return;
+    const r = cv.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top; let best = null, bd = 64;
+    for (const n of T.tree.nodes.values()) { const dx = T.X(n.birth) - mx, dy = T.Y(n.y) - my, dd = dx * dx + dy * dy; if (dd < bd) { bd = dd; best = n; } }
+    const tt = $('treeTip');
+    if (!best) { tt.hidden = true; return; }
+    const j = T.cladeOf.get(best.id), g = S.d.genomeOf(best.id), size = g.reduce((s, v) => s + (v >= 0 ? 1 : 0), 0);
+    tt.innerHTML = 'organism #' + best.id + (best.leaf ? ' (alive)' : ' (shared ancestor)') + '<br>born tick ' + fmt(best.birth) + ' · ' + size + ' rules' + (j >= 0 ? '<br>clade #' + S.an.clades[j].id : '');
+    tt.hidden = false; tt.style.left = Math.min(mx + 14, r.width - 230) + 'px'; tt.style.top = (my + 14) + 'px';
+  });
+  const end = () => { drag = null; };
+  cv.addEventListener('pointerup', end); cv.addEventListener('pointercancel', end);
+  cv.addEventListener('pointerleave', () => { $('treeTip').hidden = true; });
+  cv.addEventListener('dblclick', () => { T.view = {s: 1, x: 0, y: 0}; drawTree(); });
+  $('treeReset').addEventListener('click', () => { T.view = {s: 1, x: 0, y: 0}; drawTree(); });
+  $('treeSize').addEventListener('change', () => renderTree(true));
+})();
+
+// ── Lineage distance vs genome distance ──────────────────────────────────────
+function renderScatter() {
+  const cv = $('cvScatter'), ctx = setup(cv), d = S.d;
+  const enc = encounteredAt(S.tick);
+  const {pairs} = A.pairDistances(d, S.tick, {sampleSize: 90, encountered: enc});
+  const ps = pairs.filter(p => p.coalescence !== null);
+  const L = 40, R = 12, top = 10, bottom = cv._h - 26;
+  if (!ps.length) { ctx.fillStyle = css('--faint'); ctx.font = '12px system-ui'; ctx.fillText('Pairs from different founder lineages have no common ancestor; nothing to plot yet.', L, cv._h / 2); return; }
+  const mx = Math.max(1, ...ps.map(p => p.coalescence)), my = Math.max(10, ...ps.map(p => p.genomeDist));
+  const X = v => L + v / mx * (cv._w - L - R), Y = v => bottom - v / my * (bottom - top);
+  ctx.font = '10px ui-monospace,Consolas,monospace'; ctx.fillStyle = css('--faint'); ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  for (let i = 0; i <= 4; i++) { const v = my * i / 4; ctx.strokeStyle = css('--grid'); ctx.beginPath(); ctx.moveTo(L, Y(v) + .5); ctx.lineTo(cv._w - R, Y(v) + .5); ctx.stroke(); ctx.fillText(Math.round(v), L - 6, Y(v)); }
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  for (let i = 0; i <= 4; i++) { const v = mx * i / 4; ctx.fillText(v >= 1000 ? (v / 1000).toFixed(1) + 'k' : Math.round(v), X(v), cv._h - 12); }
+  ctx.fillText('ticks back to common ancestor', (L + cv._w) / 2, cv._h - 1);
+  ctx.globalAlpha = .28;
+  for (const p of ps) { ctx.fillStyle = '#9aa6b8'; ctx.fillRect(X(p.coalescence) - 1, Y(p.genomeDist) - 1, 2.4, 2.4); if (enc) { ctx.fillStyle = css('--accent'); ctx.fillRect(X(p.coalescence) - 1, Y(p.encounteredDist) - 1, 2.4, 2.4); } }
+  ctx.globalAlpha = 1;
+  const bins = 12, sum = new Float32Array(bins), sumE = new Float32Array(bins), n = new Float32Array(bins);
+  for (const p of ps) { const b = Math.min(bins - 1, Math.floor(p.coalescence / mx * bins)); sum[b] += p.genomeDist; sumE[b] += p.encounteredDist; n[b]++; }
+  const line = (arr, col) => { ctx.strokeStyle = col; ctx.lineWidth = 2.2; ctx.beginPath(); let on = false; for (let b = 0; b < bins; b++) { if (!n[b]) continue; const x = X((b + .5) * mx / bins), y = Y(arr[b] / n[b]); on ? ctx.lineTo(x, y) : ctx.moveTo(x, y); on = true; } ctx.stroke(); };
+  line(sum, '#d8dee8'); if (enc) line(sumE, css('--accent'));
+  S.scatter = {ps, X, Y};
+}
+
+let rz; addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => { if (S.an) { drawTimeline(); drawTree(); renderScatter(); renderClade(); } }, 150); });
+})();
+</script>
+</body>
+</html>
