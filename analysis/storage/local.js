@@ -11,7 +11,7 @@ function createRun(directory) {
 }
 
 function saveSnapshot(run, snapshot) {
-    fs.appendFileSync(run.snapshotPath, JSON.stringify(snapshot) + '\\n');
+    fs.appendFileSync(run.snapshotPath, JSON.stringify(snapshot) + '\n');
 }
 
 function completeRun(run, metadata) {
