@@ -4,10 +4,10 @@ Headless batch runs of the simulation and the phase/genome analysis behind the p
 
 ## Run simulations
 
-`run.js` loads the simulation's own source files (`hexca.js`, `stats.js`, `rulespace.js`, ...) into Node with a seeded random number generator, so a seed reproduces a run exactly. Every reporting period (1,000 ticks) it records the existing stats plus distinct-genome counts, the consensus genome (majority output per condition), the rule-frequency matrix, condition encounter rates and surviving founder lineages.
+`run.js` loads the simulation's own source files (`hexca.js`, `stats.js`, `rulespace.js`, ...) into Node with a seeded random number generator, so a seed reproduces a run exactly. Every reporting period (1,000 ticks) it records the existing stats plus distinct-genome counts, the consensus genome (majority output per condition), the rule-frequency matrix, condition encounter rates and surviving founder lineages. It also writes the complete living genome distribution to `genome-snapshots.jsonl`: each row is one sample tick and contains each unique genome once with its organism count.
 
 ```
-node analysis/run.js --seed 1 --ticks 400000 --out analysis/runs/r1 --historyTicks 0
+node analysis/run.js --seed 1 --ticks 50000 --out analysis/runs/r1 --historyTicks 0
 ```
 
 Options:
@@ -15,10 +15,14 @@ Options:
 - `--historyTicks N` keeps genealogy records only for the first N ticks (they grow by ~150 per tick).
 - `--genealogy` writes the same family-tree JSON as the in-browser export.
 - `--lineageGenomes` writes `lineage-genomes.hxlg`, the same file as the simulator's **Export lineage + genomes** button, for `lineage-explorer.html`.
-- `--settle N` stops once the grid has stayed full for N samples (default 40).
+- `--ticks N` sets the hard run limit (default 50,000).
+- `--quietThreshold N` sets the births and total deaths threshold (default 10).
+- `--stableSamples N` requires both births and total deaths to remain below the threshold for this many consecutive samples (default 5).
+- `genome-snapshots.jsonl` stores the exact genome population distribution at every reporting sample. Each genome is stored once per sample with its population count; it does not store one full genome per organism.
+- `run.json` records the seed, parameters, stop reason and snapshot filename.
 - `--params '{"mutationRate":0.02}'` overrides parameters.
 
-The runner saves `samples.json` every 10 samples.
+The runner saves `samples.json` every 10 samples and writes genome snapshots incrementally, so partial runs retain their data.
 
 ## Analyze
 
