@@ -2,7 +2,7 @@
 // Loads the repo's real simulation/stat code into a VM context with a seeded RNG,
 // steps it without drawing, and writes per-sample metrics plus the genealogy export.
 //
-// usage: node analysis/run.js --seed 1 --ticks 200000 --out runs/s1 [--genealogy]
+// usage: node analysis/run.js --seed 1 --ticks 200000 --out runs/s1 [--genealogy] [--lineageGenomes]
 
 const fs = require('fs');
 const path = require('path');
@@ -28,19 +28,20 @@ fs.mkdirSync(out, {recursive: true});
 const stubCtx = new Proxy({}, {get: () => () => ({width: 0})});
 const blobs = [];
 const sandbox = {
-    console,
+    console, TextEncoder, TextDecoder,
     document: {
         getElementById: () => ({textContent: '', value: '', checked: false}),
         createElement: () => ({getContext: () => stubCtx, click() {}, remove() {}, style: {}}),
         body: {appendChild() {}},
     },
-    Blob: class { constructor(parts) { blobs.push(parts.join('')); } },
+    // Keeps each export's parts as written: strings for JSON, ArrayBuffers for binary.
+    Blob: class { constructor(parts) { blobs.push(parts); } },
     URL: {createObjectURL: () => '', revokeObjectURL() {}},
     gameEngine: {ctx: stubCtx},
 };
 vm.createContext(sandbox);
 
-const files = ['params.js', 'util.js', 'graph.js', 'histogram.js', 'views.js', 'rulespace.js', 'stats.js', 'hexca.js'];
+const files = ['params.js', 'util.js', 'graph.js', 'histogram.js', 'views.js', 'rulespace.js', 'stats.js', 'organismlog.js', 'hexca.js'];
 // Seeded RNG (mulberry32), defined in the same script as the sim so V8 can inline it.
 // State lives in a closure: global vars in a VM context go through a slow interceptor.
 let src = `Math.random = (function () { let s = ${seed >>> 0} ^ 0xA5A5A5A5;
@@ -72,7 +73,7 @@ function genomeString(key) {
     return s;
 }
 
-// organismHistory grows by ~150 records per tick, so long runs keep genealogy only
+// The organism log grows by ~150 records per tick, so long runs can keep genealogy only
 // for the first --historyTicks ticks. Founder (ancestorId) counts are unaffected.
 const historyTicks = args.historyTicks !== undefined ? parseInt(args.historyTicks) : Infinity;
 let historyCapped = false;
@@ -87,7 +88,7 @@ const dominantGenomes = {};   // genome string -> first tick seen as dominant
 const t0 = Date.now();
 for (let t = 1; t <= ticks; t++) {
     if (!historyCapped && hexca.tick >= historyTicks) {
-        hexca.organismHistory.push = () => 0;
+        hexca.log.enabled = false;
         historyCapped = true;
     }
     hexca.update();
@@ -160,7 +161,7 @@ for (let t = 1; t <= ticks; t++) {
         topFounder: fSorted.length ? fSorted[0][0] : -1,
         topFounderShare: fSorted.length ? fSorted[0][1] / alive : 0,
         top3Founders: fSorted.slice(0, 3).map(([f, c]) => [f, +(c / alive).toFixed(4)]),
-        organismsRecorded: hexca.organismHistory.length,
+        organismsRecorded: hexca.log.length,
         consensus,
         consensusSize: consensus.replace(/\./g, '').length,
         consensusAgreement: agree / ncond,
@@ -186,16 +187,23 @@ saveSamples();
 if (args.genealogy) {
     blobs.length = 0;
     hexca.exportGenealogy();
-    fs.writeFileSync(path.join(out, 'genealogy.json'), blobs[0]);
+    fs.writeFileSync(path.join(out, 'genealogy.json'), blobs[0].join(''));
 }
-// Compact lineage table straight from organismHistory (works even when the full export is huge).
-const fl = new Map();
-for (const o of hexca.organismHistory) {
-    let r = fl.get(o.founderId);
-    if (!r) fl.set(o.founderId, r = {founder: o.founderId, members: 0, alive: 0, lastBirth: 0, lastDeath: 0});
+// Lineage + genome export (hexca.exportLineageGenomes), the file lineage-explorer.html reads.
+if (args.lineageGenomes) {
+    blobs.length = 0;
+    hexca.exportLineageGenomes(stats);
+    fs.writeFileSync(path.join(out, 'lineage-genomes.hxlg'), Buffer.from(blobs[0][0]));
+}
+// Compact lineage table straight from the organism log (works even when the full export is huge).
+const fl = new Map(), L = hexca.log;
+for (let id = 0; id < L.length; id++) {
+    const f = L.founder[id];
+    let r = fl.get(f);
+    if (!r) fl.set(f, r = {founder: f, members: 0, alive: 0, lastBirth: 0, lastDeath: 0});
     r.members++;
-    if (o.deathTick === null) r.alive++; else r.lastDeath = Math.max(r.lastDeath, o.deathTick);
-    r.lastBirth = Math.max(r.lastBirth, o.birthTick);
+    if (L.death[id] === -1) r.alive++; else r.lastDeath = Math.max(r.lastDeath, L.death[id]);
+    r.lastBirth = Math.max(r.lastBirth, L.birth[id]);
 }
 fs.writeFileSync(path.join(out, 'lineages.json'), JSON.stringify([...fl.values()]));
-console.log(`seed ${seed} done: ${hexca.tick} ticks, ${hexca.organismHistory.length} organisms, ${((Date.now() - t0) / 1000).toFixed(0)}s`);
+console.log(`seed ${seed} done: ${hexca.tick} ticks, ${hexca.log.length} organisms, ${((Date.now() - t0) / 1000).toFixed(0)}s`);

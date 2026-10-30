@@ -30,3 +30,10 @@ Keys 1–4 switch statistics pages, G toggles genotype coloring, L toggles found
 5. Use **Download lineage summary CSV** to save the per-founder statistics for later analysis.
 
 The genealogy explorer processes the selected file locally in the browser. It reports recorded descendants, living and dead members at export, maximum generation depth, birth tick range, and whether each founder lineage is extinct at export. These are descriptive ancestry measures, not proof that a lineage caused a phase transition.
+
+## Lineage + genome analysis
+1. Run the simulation and click **Export lineage + genomes**. This saves a compact `.hxlg` file with every organism's parent, founder, birth and death tick, and genome (stored as the rules that changed from its parent), plus the stats time series.
+2. Open [lineage-explorer.html](./lineage-explorer.html) in a browser and select the file.
+3. Use the timeline (population by colour, a Muller plot of clades coloured by genome, the time to the most recent common ancestor, births and deaths) to line up phase changes with extinctions and sweeps. Click to inspect a clade's genome and the rule changes it carries, or to set the tick for the zoomable family tree and the lineage-vs-genome distance plot.
+
+A 45,000-tick run (about 5 million organisms) exports to about 160 MB and analyses in about 5 seconds. See [analysis/README.md](./analysis/README.md) for the file format and the batch analysis scripts.
