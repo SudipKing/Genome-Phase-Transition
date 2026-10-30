@@ -117,10 +117,10 @@ for (let t = 1; t <= ticks; t++) {
     const sampleRuleDeaths = last(stats.ruleDeathSeries) || 0;
     const sampleRandomDeaths = last(stats.randomDeathSeries) || 0;
     const sampleTotalDeaths = sampleRuleDeaths + sampleRandomDeaths;
-    fs.appendFileSync(snapshotPath, JSON.stringify({
+    runStorage.saveSnapshot(storedRun, {
         tick: hexca.tick, population: alive, distinctGenomes: genomeSnapshot.length,
         genomes: genomeSnapshot
-    }) + '\\n');
+    });
     const fSorted = [...founderCounts.entries()].sort((a, b) => b[1] - a[1]);
     let simpson = 0;
     for (const [, c] of genomeCounts) simpson += (c / alive) ** 2;
