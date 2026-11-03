@@ -2,6 +2,7 @@
 // Unlike symmetry.js (which compares one consensus genome per run), this compares the
 // actual final genome populations from genome-snapshots.jsonl(.gz). It also scores how
 // symmetric each endpoint is: its similarity to itself with its two main colours swapped.
+// actual final genome populations from genome-snapshots.jsonl(.gz).
 //
 // Each population is summarised by its rule profile: for every condition, the share of
 // organisms whose genome has no rule ('.') or outputs R, G or B there. Two profiles are
@@ -30,6 +31,7 @@ const CLUSTER = Number(args.cluster || 0.75);   // similarity needed to join a c
 if (dirs.length < 2) { console.error('usage: node endpoints.js <run dir> <run dir> ...'); process.exit(1); }
 
 const {colourSpace, endpointBox} = require('./colours.js');
+const SYM = 'RGBYCM';
 
 function load(dir) {
     const run = JSON.parse(fs.readFileSync(path.join(dir, 'run.json'), 'utf8'));
@@ -44,6 +46,8 @@ if (runs[0].run.params.historyRules) { console.error('endpoints.js does not supp
 for (const r of runs) if (r.run.conditions.length !== ncond || r.run.params.n !== n)
     { console.error(`${r.name}: different condition space`); process.exit(1); }
 const cs = colourSpace(conds, n), SYM = cs.SYM;
+
+const condIndex = new Map(conds.map((c, i) => [c.join(','), i]));
 const outIndex = ch => ch === '.' ? 0 : SYM.indexOf(ch) + 1;
 
 // Rule profile: Float64Array(ncond × (n+1)), each condition's row sums to 1.
@@ -56,6 +60,32 @@ function profile(snap) {
     }
     for (let i = 0; i < P.length; i++) P[i] /= total || 1;
     return P;
+}
+
+function permutations(k) {
+    if (k === 1) return [[0]];
+    const out = [];
+    for (const p of permutations(k - 1))
+        for (let i = 0; i <= p.length; i++) out.push([...p.slice(0, i), k - 1, ...p.slice(i)]);
+    return out;
+}
+const perms = permutations(n).sort((a, b) => a.join('').localeCompare(b.join('')));
+const permName = p => p.map(k => SYM[k]).join('');   // "BGR": R→B, G→G, B→R
+
+// Condition map under colour permutation p (old colour k → p[k]).
+const condMaps = perms.map(p => conds.map(([s, ...cnt]) => {
+    const m = new Array(n).fill(0);
+    for (let k = 0; k < n; k++) m[p[k]] = cnt[k];
+    return condIndex.get([p[s], ...m].join(','));
+}));
+function permuteProfile(P, pi) {
+    const p = perms[pi], cm = condMaps[pi], Q = new Float64Array(P.length);
+    for (let c = 0; c < ncond; c++) {
+        const j = cm[c];
+        Q[j * nOut] = P[c * nOut];
+        for (let k = 0; k < n; k++) Q[j * nOut + 1 + p[k]] = P[c * nOut + 1 + k];
+    }
+    return Q;
 }
 function similarity(A, B) {
     let num = 0, den = 0;
@@ -74,6 +104,9 @@ function bestMatch(A, B) {
     for (let pi = 0; pi < cs.perms.length; pi++) {
         const s = similarity(cs.relabelProfile(A, pi), B);
         if (s > best.sim) best = {sim: s, perm: cs.permName(pi)};
+    for (let pi = 0; pi < perms.length; pi++) {
+        const s = similarity(permuteProfile(A, pi), B);
+        if (s > best.sim) best = {sim: s, perm: permName(perms[pi])};
     }
     return best;
 }
@@ -86,6 +119,24 @@ function swapPerm(x, y) {
 const finals = runs.map(r => {
     const snap = r.snaps[r.snaps.length - 1];
     const b = endpointBox(r.last, PRESENT);
+// Endpoint "box": colours present above PRESENT, most common first.
+function box(sample) {
+    if (sample.pop < 0.01) return {label: 'extinct', order: []};
+    const order = sample.colors.map((f, k) => [f, k]).filter(x => x[0] > PRESENT).sort((a, b) => b[0] - a[0]).map(x => x[1]);
+    return {label: order.map(k => SYM[k]).join('>') + (sample.pop >= 0.95 ? ' full' : ''), order};
+}
+// Relabel so the dominant colour is R, the next G, and so on; absent colours fill the rest.
+function canonicalPerm(order) {
+    const p = new Array(n), used = new Set();
+    order.forEach((k, rank) => { p[k] = rank; used.add(k); });
+    let next = order.length;
+    for (let k = 0; k < n; k++) if (!used.has(k)) p[k] = next++;
+    return perms.findIndex(q => q.every((v, i) => v === p[i]));
+}
+
+const finals = runs.map(r => {
+    const snap = r.snaps[r.snaps.length - 1];
+    const b = box(r.last);
     const P = profile(snap);
     return {name: r.name, seed: r.seed, tick: snap.tick, stopReason: r.run.stopReason,
         pop: +r.last.pop.toFixed(3), colors: r.last.colors.map(c => +c.toFixed(3)),
@@ -95,6 +146,8 @@ const finals = runs.map(r => {
         genomes: new Set(snap.genomes.map(g => g[0])),
         // Are the two most common colours interchangeable? Similarity to itself with them swapped.
         survivorSwap: b.order.length >= 2 ? +similarity(P, cs.relabelProfile(P, swapPerm(b.order[0], b.order[1]))).toFixed(3) : null};
+        P, canon: permuteProfile(P, canonicalPerm(b.order)),
+        genomes: new Set(snap.genomes.map(g => g[0]))};
 });
 
 // Pairwise scores.
@@ -137,12 +190,20 @@ const convergence = runs.map((r, i) => {
 });
 
 // Rules most runs share once every endpoint is put in canonical colours (dominant = R).
+function ruleText(c, out) {
+    const [s, ...cnt] = conds[c];
+    const nb = cnt.map((v, k) => v ? v + SYM[k] : '').filter(Boolean);
+    const empty = 6 - cnt.reduce((x, y) => x + y, 0);
+    if (empty) nb.push(empty + ' empty');
+    return `${SYM[s]} with ${nb.join(' ')} → ${out}`;
+}
 const shared = [];
 for (let c = 0; c < ncond; c++) for (let o = 1; o < nOut; o++) {
     const shares = finals.map(f => f.canon[c * nOut + o]);
     const carriers = shares.filter(v => v >= 0.5).length;
     if (carriers >= 2) shared.push({cond: c, out: SYM[o - 1], runs: carriers,
         meanShare: +(shares.reduce((x, y) => x + y, 0) / N).toFixed(3), text: cs.ruleText(c, SYM[o - 1])});
+        meanShare: +(shares.reduce((x, y) => x + y, 0) / N).toFixed(3), text: ruleText(c, SYM[o - 1])});
 }
 shared.sort((x, y) => y.runs - x.runs || y.meanShare - x.meanShare);
 
@@ -157,6 +218,7 @@ process.stdout.write(JSON.stringify(result, null, 1));
 const pad = (s, w) => String(s).padEnd(w);
 console.error('\nEndpoints');
 for (const f of result.runs) console.error(`  ${pad(f.name, 6)} ${pad(f.box, 12)} pop ${f.pop}  colours ${f.colors.join('/')}  distinct ${f.distinctGenomes}${f.survivorSwap !== null ? '  swap ' + f.survivorSwap : ''}  ${f.stopReason} @ ${f.tick}`);
+for (const f of result.runs) console.error(`  ${pad(f.name, 6)} ${pad(f.box, 12)} pop ${f.pop}  colours ${f.colors.join('/')}  distinct ${f.distinctGenomes}  ${f.stopReason} @ ${f.tick}`);
 console.error('\nPairs                 raw   relabeled  perm  canonical  shared genomes');
 for (const p of pairs) console.error(`  ${pad(p.a + '–' + p.b, 18)} ${pad(p.raw, 6)} ${pad(p.relabeled, 10)} ${pad(p.perm, 5)} ${pad(p.canonical, 10)} ${p.sharedGenomes}`);
 console.error(`\nClusters (relabeled similarity ≥ ${CLUSTER})`);

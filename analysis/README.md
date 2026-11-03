@@ -61,6 +61,7 @@ node analysis/endpoint-figure.js analysis/runs/endpoints.json analysis/runs/clus
 ```
 
 Writes one self-contained HTML page from the two analyses: each run's final colours beside its genetic clusters, every pair's similarity raw vs relabeled (split by whether the runs kept the same surviving colours), the run-by-run distance heatmap, the core rulebook and each cluster's defining rules.
+`endpoints.js` asks whether independent runs end in the same genetic place, using the actual final genome populations from the snapshots rather than one consensus genome. Each population becomes a rule profile (per condition, the share of organisms with no rule or each output colour). Two profiles are compared by total-variation distance per condition, weighted by how much either population uses that condition, so similarity is 1 for identical populations. Every pair is scored raw and under all colour relabelings (the permutation moves the condition's own colour, its neighbour counts and the output together). It also reports each run's endpoint box (colours above 8%, most common first), exact genomes shared between runs, average-linkage clusters (`--cluster`, default 0.75), when each run came within 0.9 of its final population, and the rules most runs share once every endpoint is relabeled so its dominant colour is R. A readable summary goes to stderr.
 
 ## Lineage + genomes
 
