@@ -13,6 +13,7 @@ class Stats {
         this.genomeSeries    = [];
         this.birthSeries     = [];
         this.ruleDeathSeries = [];
+        this.randomDeathSeries = [];
         this.genomeDist      = [];
         this.clusterSeries   = [];
         this.meanAgeSeries   = [];
@@ -145,6 +146,7 @@ class Stats {
         this.genomeSeries.push(alive > 0 ? s.genomeSizeSum / alive : 0);
         this.birthSeries.push(this._birthAccum / period);
         this.ruleDeathSeries.push(this._ruleDeathAccum / period);
+        this.randomDeathSeries.push(this._randomDeathAccum / period);
         this.genomeDist.push([...s.genomeSizeBuckets]);
 
         this.clusterSeries.push(s.clusterCoeff);
