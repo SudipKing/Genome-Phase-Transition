@@ -18,7 +18,7 @@ Options:
 - `--ticks N` sets the hard run limit (default 50,000).
 - `--quietThreshold N` sets the births and total deaths threshold (default 10).
 - `--stableSamples N` requires both births and total deaths to remain below the threshold for this many consecutive samples (default 5).
-- `genome-snapshots.jsonl` stores the exact genome population distribution at every reporting sample. Each genome is stored once per sample with its population count; it does not store one full genome per organism.
+- `genome-snapshots.jsonl.gz` stores the exact genome population distribution at every reporting sample. Each genome is stored once per sample with its population count; it does not store one full genome per organism. Each line is its own gzip member, so the file stays append-only and a partial run is still readable (about 3 MB for a 50,000-tick run instead of about 30 MB). `--plainSnapshots` writes uncompressed `genome-snapshots.jsonl` instead; `readSnapshots(dir)` in `storage/local.js` reads either.
 - `run.json` records the seed, parameters, stop reason and snapshot filename.
 - `--params '{"mutationRate":0.02}'` overrides parameters.
 
@@ -35,6 +35,14 @@ node analysis/build-report.js analysis/rd.json analysis/findings.json analysis/r
 - `analyze.js` splits each run into phases (which colours are above 8% of living cells, and whether the grid is at least 95% full) and summarizes each phase.
 - `symmetry.js` compares final-phase consensus genomes across runs under all six colour relabelings.
 - `build-report.js` renders `template.html` with the data and the text in `findings.json`.
+
+### Common endpoints
+
+```
+node analysis/endpoints.js analysis/runs/e1 analysis/runs/e2 ... > analysis/runs/endpoints.json
+```
+
+`endpoints.js` asks whether independent runs end in the same genetic place, using the actual final genome populations from the snapshots rather than one consensus genome. Each population becomes a rule profile (per condition, the share of organisms with no rule or each output colour). Two profiles are compared by total-variation distance per condition, weighted by how much either population uses that condition, so similarity is 1 for identical populations. Every pair is scored raw and under all colour relabelings (the permutation moves the condition's own colour, its neighbour counts and the output together). It also reports each run's endpoint box (colours above 8%, most common first), exact genomes shared between runs, average-linkage clusters (`--cluster`, default 0.75), when each run came within 0.9 of its final population, and the rules most runs share once every endpoint is relabeled so its dominant colour is R. A readable summary goes to stderr.
 
 ## Lineage + genomes
 
