@@ -84,7 +84,7 @@ const quietThreshold = Number(args.quietThreshold || 10);
 const stableSamples = Number(args.stableSamples || 5);
 let quietStreak = 0;
 let stopReason = 'max-ticks';
-const storedRun = runStorage.createRun(out);
+const storedRun = runStorage.createRun(out, {gzip: !args.plainSnapshots});
 function saveSamples() {
     fs.writeFileSync(path.join(out, 'samples.json'), JSON.stringify({seed, ticks: hexca.tick, params: P, conditions: hexca.conditions, samples, dominantGenomes}));
 }
@@ -204,7 +204,7 @@ saveSamples();
 runStorage.completeRun(storedRun, {
     format: 'hex-ca-run-v1', seed, ticks: hexca.tick, stopReason,
     quietThreshold, stableSamples, params: P, conditions: hexca.conditions,
-    snapshotFile: 'genome-snapshots.jsonl', sampleCount: samples.length
+    snapshotFile: storedRun.snapshotFile, sampleCount: samples.length
 });
 
 // Real genealogy export path (hexca.exportGenealogy), captured through the Blob stub.
