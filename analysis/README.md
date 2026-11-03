@@ -42,7 +42,25 @@ node analysis/build-report.js analysis/rd.json analysis/findings.json analysis/r
 node analysis/endpoints.js analysis/runs/e1 analysis/runs/e2 ... > analysis/runs/endpoints.json
 ```
 
-`endpoints.js` asks whether independent runs end in the same genetic place, using the actual final genome populations from the snapshots rather than one consensus genome. Each population becomes a rule profile (per condition, the share of organisms with no rule or each output colour). Two profiles are compared by total-variation distance per condition, weighted by how much either population uses that condition, so similarity is 1 for identical populations. Every pair is scored raw and under all colour relabelings (the permutation moves the condition's own colour, its neighbour counts and the output together). It also reports each run's endpoint box (colours above 8%, most common first), exact genomes shared between runs, average-linkage clusters (`--cluster`, default 0.75), when each run came within 0.9 of its final population, and the rules most runs share once every endpoint is relabeled so its dominant colour is R. A readable summary goes to stderr.
+`endpoints.js` asks whether independent runs end in the same genetic place, using the actual final genome populations from the snapshots rather than one consensus genome. Each population becomes a rule profile (per condition, the share of organisms with no rule or each output colour). Two profiles are compared by total-variation distance per condition, weighted by how much either population uses that condition, so similarity is 1 for identical populations. Every pair is scored raw and under all colour relabelings (the permutation moves the condition's own colour, its neighbour counts and the output together). It also reports each run's endpoint box (colours above 8%, most common first), how symmetric the endpoint is (`survivorSwap`: similarity to itself with its two main colours swapped), exact genomes shared between runs, average-linkage clusters (`--cluster`, default 0.75), when each run came within 0.9 of its final population, and the rules most runs share once every endpoint is relabeled so its dominant colour is R. A readable summary goes to stderr.
+
+### Genome clusters
+
+```
+node analysis/clusters.js analysis/runs/c1 analysis/runs/c2 ... > analysis/runs/clusters.json
+```
+
+`clusters.js` is the cluster analysis on individual genomes, with no lineage data. From each run's final snapshot (or `--tick T`) it draws `--sample` organisms at random (default 300, weighted by genome counts, seeded with `--seed`), relabels each run so its surviving colours take the first labels (R, G) and extinct colours the rest (`colours.js`), and measures Hamming distance over all 252 conditions. Surviving colours often hold nearly equal shares, so instead of ranking them by share it tries every order of a run's survivors and keeps the one whose rule profile is closest to the other runs' (`--noAlign` ranks by share instead). k-medoids clusters the pooled genomes for k = 2..`--kmax` and keeps the k with the best silhouette. It reports each run's main cluster, each cluster's medoid genome and the runs it draws from, the rules that define a cluster (carried by at least 80% of it and at most 30% of the rest), and the mean distance between runs (raw and relabeled; the diagonal is the spread within a run). It also lists the core rules: those carried by at least half the organisms in all but at most one run.
+
+`colours.js` holds the colour relabeling shared by `endpoints.js` and `clusters.js`.
+
+### Figure
+
+```
+node analysis/endpoint-figure.js analysis/runs/endpoints.json analysis/runs/clusters.json analysis/runs/figure.html
+```
+
+Writes one self-contained HTML page from the two analyses: each run's final colours beside its genetic clusters, every pair's similarity raw vs relabeled (split by whether the runs kept the same surviving colours), the run-by-run distance heatmap, the core rulebook and each cluster's defining rules.
 
 ## Lineage + genomes
 
