@@ -83,6 +83,22 @@ const samples = [];
 const quietThreshold = Number(args.quietThreshold || 10);
 const stableSamples = Number(args.stableSamples || 5);
 let quietStreak = 0;
+// Optional: stop once the grid has been at least 95% full for this many samples.
+const settleFull = Number(args.settleFull || 0);
+let fullStreak = 0;
+// Clade windows: every cladeEvery ticks each living cell becomes its own clade root, so
+// the share of the biggest clade at the end of a window measures how strongly one
+// sub-lineage swept during it (founder IDs are kept separately in ancestorId).
+const cladeEvery = Number(args.cladeEvery || 5000);
+let cladeWindowStart = 0;
+function resetClades() {
+    for (let i = 0; i < N; i++) hexca.cladeId[i] = hexca.color[i] === -1 ? -1 : i;
+    cladeWindowStart = hexca.tick;
+}
+resetClades();
+// Per-condition facts that do not change during a run.
+const nDeadOf = hexca.conditions.map(cond => { let live = 0; for (let k = 0; k < n; k++) live += cond[cond.length - n + k]; return 6 - live; });
+const quantile = (sorted, q) => sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))] : 0;
 let stopReason = 'max-ticks';
 const storedRun = runStorage.createRun(out, {gzip: !args.plainSnapshots});
 function saveSamples() {
@@ -100,7 +116,8 @@ for (let t = 1; t <= ticks; t++) {
     if (hexca.tick % period !== 0) continue;
 
     // Extra per-sample metrics the in-browser stats don't compute.
-    const genomeCounts = new Map(), founderCounts = new Map();
+    const genomeCounts = new Map(), founderCounts = new Map(), cladeCounts = new Map();
+    const sizes = [];
     let alive = 0;
     for (let i = 0; i < N; i++) {
         if (hexca.color[i] === -1) continue;
@@ -109,7 +126,16 @@ for (let t = 1; t <= ticks; t++) {
         genomeCounts.set(k, (genomeCounts.get(k) || 0) + 1);
         const f = hexca.ancestorId[i];
         founderCounts.set(f, (founderCounts.get(f) || 0) + 1);
+        const cl = hexca.cladeId[i];
+        cladeCounts.set(cl, (cladeCounts.get(cl) || 0) + 1);
+        sizes.push(hexca.genomeSize[i]);
     }
+    sizes.sort((a, b) => a - b);
+    let topClade = 0;
+    for (const [, c] of cladeCounts) if (c > topClade) topClade = c;
+    // Rule deaths by condition over this reporting period, then clear the counter.
+    const deathCond = Array.from(hexca.ruleDeathCount);
+    hexca.ruleDeathCount.fill(0);
     const gSorted = [...genomeCounts.entries()].sort((a, b) => b[1] - a[1]);
     const genomeSnapshot = gSorted.map(([key, count]) => [genomeString(key), count]);
     const last = a => a.length ? a[a.length - 1] : null;
@@ -122,8 +148,8 @@ for (let t = 1; t <= ticks; t++) {
         genomes: genomeSnapshot
     });
     const fSorted = [...founderCounts.entries()].sort((a, b) => b[1] - a[1]);
-    let simpson = 0;
-    for (const [, c] of genomeCounts) simpson += (c / alive) ** 2;
+    let simpson = 0, shannon = 0;
+    for (const [, c] of genomeCounts) { const q = c / alive; simpson += q * q; shannon -= q * Math.log(q); }
     const domStr = gSorted.length ? genomeString(gSorted[0][0]) : '';
     if (domStr && !(domStr in dominantGenomes)) dominantGenomes[domStr] = hexca.tick;
 
@@ -149,6 +175,16 @@ for (let t = 1; t <= ticks; t++) {
         for (let c = 0; c < ncond; c++) if (SYM[hexca.genomes[base + c] + 1] !== consensus[c]) hamSum++;
     }
     const enc = last(rs.encFreq);
+    // How the population's rules, encounters and rule deaths split by the number of empty
+    // neighbours (0 = fully surrounded ... 6 = isolated).
+    const consByDead = new Array(7).fill(0), encByDead = new Array(7).fill(0), deathByDead = new Array(7).fill(0);
+    let deathTotal = 0;
+    for (let c = 0; c < ncond; c++) {
+        if (consensus[c] !== '.') consByDead[nDeadOf[c]]++;
+        if (enc) encByDead[nDeadOf[c]] += enc[c];
+        deathByDead[nDeadOf[c]] += deathCond[c];
+        deathTotal += deathCond[c];
+    }
     samples.push({
         tick: hexca.tick,
         pop: alive / N,
@@ -183,12 +219,25 @@ for (let t = 1; t <= ticks; t++) {
         meanDistFromConsensus: alive ? hamSum / alive : 0,
         P: Prow,                                              // per-mille, ncond × (n+1)
         enc: enc ? Array.from(enc, v => +v.toFixed(5)) : null, // encounters per cell-tick
+        deathCond,                                            // rule deaths per condition this period
+        consByDead, encByDead: encByDead.map(v => +v.toFixed(5)),
+        deathByDead: deathByDead.map(v => deathTotal ? +(v / deathTotal).toFixed(4) : 0),
+        genomeSizeQ: [0.1, 0.5, 0.9].map(q => quantile(sizes, q)),
+        shannonGenomes: alive ? +Math.exp(shannon).toFixed(1) : 0,  // effective number (Hill q=1)
+        cladeWindowStart, cladesAlive: cladeCounts.size, topCladeShare: alive ? topClade / alive : 0,
     });
+    if (hexca.tick % cladeEvery === 0) resetClades();
     if (alive === 0) { stopReason = 'extinction'; console.log(`seed ${seed}: extinct at tick ${hexca.tick}`); break; }
     // Checkpoint so a stopped run still leaves data behind.
     if (samples.length % 10 === 0) saveSamples();
     // Stop only after births and all deaths stay below the threshold for several samples.
     quietStreak = sampleBirths < quietThreshold && sampleTotalDeaths < quietThreshold ? quietStreak + 1 : 0;
+    fullStreak = alive / N >= 0.95 ? fullStreak + 1 : 0;
+    if (settleFull && fullStreak >= settleFull) {
+        stopReason = 'grid-full-settled';
+        console.log(`seed ${seed}: grid at least 95% full for ${settleFull} samples; stopping at tick ${hexca.tick}`);
+        break;
+    }
     if (quietStreak >= stableSamples) {
         stopReason = 'births-and-deaths-below-threshold';
         console.log(`seed ${seed}: births and deaths below ${quietThreshold} for ${stableSamples} samples; stopping at tick ${hexca.tick}`);
@@ -203,7 +252,7 @@ for (let t = 1; t <= ticks; t++) {
 saveSamples();
 runStorage.completeRun(storedRun, {
     format: 'hex-ca-run-v1', seed, ticks: hexca.tick, stopReason,
-    quietThreshold, stableSamples, params: P, conditions: hexca.conditions,
+    quietThreshold, stableSamples, settleFull, cladeEvery, params: P, conditions: hexca.conditions,
     snapshotFile: storedRun.snapshotFile, sampleCount: samples.length
 });
 

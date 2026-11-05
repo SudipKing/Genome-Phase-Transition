@@ -22,7 +22,36 @@ Options:
 - `run.json` records the seed, parameters, stop reason and snapshot filename.
 - `--params '{"mutationRate":0.02}'` overrides parameters.
 
+- `--settleFull N` stops once the grid has been at least 95% full for N consecutive samples.
+- `--cladeEvery N` (default 5,000) restarts clades every N ticks: each living cell becomes its own clade root (`hexca.cladeId`, inherited like the founder ID), so the largest clade's share at the end of a window measures how strongly one sub-lineage swept during it. Founder IDs are not touched.
+- Each sample also records rule deaths per condition (`deathCond`, from `hexca.ruleDeathCount`), the consensus rules, encounters and rule deaths split by the number of empty neighbours (`consByDead`, `encByDead`, `deathByDead`), genome-size quantiles (`genomeSizeQ`: p10, p50, p90), the effective number of genomes (`shannonGenomes`, exp of the Shannon entropy) and the clade measures (`cladesAlive`, `topCladeShare`, `cladeWindowStart`). None of these draw random numbers, so a seed still reproduces the same run.
+
 The runner saves `samples.json` every 10 samples and writes genome snapshots incrementally, so partial runs retain their data.
+
+### Batches
+
+```
+node analysis/batch.js analysis/plans/nov-batch.json --jobs 4
+```
+
+`batch.js` runs every seed of every parameter set in a plan file in parallel and writes each run to `<out>/<set>-s<seed>`, plus `batch.json` listing the runs. Runs that already have a `run.json` are skipped, so a stopped batch can be restarted. `plans/nov-batch.json` is the November batch: 24 seeds at default settings, then 6 seeds each with mutation rate 0.005 and 0.02, random death 0.0005 and 0.002, and k 0.05 and 0.2.
+
+## In-depth analysis and the Phase Explorer
+
+```
+node analysis/deep.js analysis/runs/nov > analysis/runs/nov-deep.json
+node analysis/explorer.js analysis/runs/nov-deep.json analysis/runs/explorer.html
+```
+
+`deep.js` reads a batch directory (or a list of run directories) and, for every run, splits it into phases (`phases.js`) and phase classes (3-colour churn, 2-colour churn, 2-colour full, ...), finds the fill (start of the final full-grid phase) and times these events relative to it: the third colour lost, population reaching 80%, the consensus becoming mostly rules for fully surrounded cells, genome size halfway down, rule deaths collapsing, the rule-space velocity peak, the nearest clade sweep and the last founder. Across runs it summarises each parameter set (fill time, extinctions, endpoints, phase sequences), each phase class (population, genome size, rule composition by empty neighbours, where cells are and where they die, diversity, clade sweeps), compares phase consensus genomes within a phase class across runs vs across phase classes (best of the six colour relabelings), lists each phase's core rules, and aligns every metric on the fill. A readable summary goes to stderr.
+
+`explorer.js` turns that into one self-contained page (`explorer-template.html`, no network needed):
+
+- **Overview:** the parameter sets and a phase timeline of every run.
+- **Phases:** a table per phase class, bar charts of rules / encounters / rule deaths by empty neighbours, clade sweeps by phase, the genome similarity matrix and each phase's core rules.
+- **Timing:** the order of events around the fill, and any metric aligned on the fill (per run plus median, or the medians of every set).
+- **Parameter sweep:** time to fill per set, phase sequences and endpoints.
+- **Run detail:** synced charts for one run (colours, genome size with p10–p90 band, rule composition, encounters and rule deaths by empty neighbours, births and deaths, diversity, clade sweeps, velocity, coherence) above the consensus genome strip, with phases shaded and an option to relabel colours so the final dominant colour is R.
 
 ## Analyze
 

@@ -45,6 +45,9 @@ class HexCA {
         // Founder identity is independent of mutable genome content.
         this.ancestorId = new Int32Array(this.N).fill(-1);
         this.nextAncestorId = 0;
+        // Clade identity: inherited like ancestorId, but the batch runner can reset it
+        // (every living cell becomes its own clade root) to measure sweeps within a window.
+        this.cladeId = new Int32Array(this.N).fill(-1);
         // Each organism has a unique identity, separate from its founder lineage.
         this.organismId = new Int32Array(this.N).fill(-1);
         this.parentId = new Int32Array(this.N).fill(-1);
@@ -89,6 +92,9 @@ class HexCA {
 
         // Cumulative per-condition encounter counts (reset each reporting period by Stats)
         this.encounterCount = new Int32Array(this.ncond);
+        // Rule deaths per condition (cell met a condition its genome has no rule for).
+        // Read and cleared by the batch runner; the browser views do not use it.
+        this.ruleDeathCount = new Int32Array(this.ncond);
         this.encounterTicks = 0;
         this.encounterCellTicks = 0;
 
@@ -269,6 +275,7 @@ class HexCA {
                     const c = randomInt(n);
                     this.color[i] = c;
                     this.ancestorId[i] = this.nextAncestorId++;
+                    this.cladeId[i] = this.ancestorId[i];
                     this.organismId[i] = this.nextOrganismId++;
                     this.parentId[i] = -1;
                     this.mtf[i * n] = c;
@@ -388,6 +395,7 @@ class HexCA {
             encounterCellTicks++;
 
             if (rule === -1) {
+                if (condIdx >= 0) this.ruleDeathCount[condIdx]++;
                 this._recordOrganismDeath(i);
                 writeColor[i] = -1;
                 ruleDeathsThisTick++;
@@ -502,6 +510,7 @@ class HexCA {
             writeColor[targetKey] = color[i];
             // Keep founder lineage separate from parentage and genome mutation.
             this.ancestorId[targetKey] = this.ancestorId[i];
+            this.cladeId[targetKey] = this.cladeId[i];
             this.parentId[targetKey] = this.organismId[i];
             this.organismId[targetKey] = this.nextOrganismId++;
             this.log.add(this.organismId[targetKey], this.organismId[i], this.ancestorId[targetKey], this.tick,

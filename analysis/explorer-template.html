@@ -1,0 +1,556 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phase Explorer</title>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f6f5f2; --surface: #fcfcfb; --ink: #0b0b0b; --ink2: #52514e; --muted: #85837d;
+  --rule: #e4e2dc; --grid: #ecebe6; --band: #f0efec;
+  --cR: #e34948; --cG: #008300; --cB: #2a78d6;
+  --p0: #eb6834; --p1: #6250d6; --p2: #1baf7a; --pX: #a9a7a0;
+  --s0: #0d366b; --s1: #184f95; --s2: #256abf; --s3: #3987e5; --s4: #6da7ec; --s5: #9ec5f4; --s6: #cde2fb;
+  --none: #e9e7e1; --accent: #2a78d6;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --bg: #121211; --surface: #1a1a19; --ink: #f0efec; --ink2: #c3c2b7; --muted: #8f8e86;
+    --rule: #33332f; --grid: #2a2a27; --band: #222220;
+    --cR: #e66767; --cG: #1f9a1f; --cB: #3987e5;
+    --p0: #d95926; --p1: #9085e9; --p2: #199e70; --pX: #6b6a64;
+    --s0: #cde2fb; --s1: #9ec5f4; --s2: #6da7ec; --s3: #3987e5; --s4: #256abf; --s5: #184f95; --s6: #0d366b;
+    --none: #2c2c29; --accent: #3987e5;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #121211; --surface: #1a1a19; --ink: #f0efec; --ink2: #c3c2b7; --muted: #8f8e86;
+  --rule: #33332f; --grid: #2a2a27; --band: #222220;
+  --cR: #e66767; --cG: #1f9a1f; --cB: #3987e5;
+  --p0: #d95926; --p1: #9085e9; --p2: #199e70; --pX: #6b6a64;
+  --s0: #cde2fb; --s1: #9ec5f4; --s2: #6da7ec; --s3: #3987e5; --s4: #256abf; --s5: #184f95; --s6: #0d366b;
+  --none: #2c2c29; --accent: #3987e5;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { padding: 20px 24px 0; max-width: 1280px; margin: 0 auto; }
+h1 { font-size: 22px; margin: 0 0 4px; font-weight: 650; }
+.sub { color: var(--ink2); margin: 0 0 14px; }
+nav { display: flex; gap: 4px; flex-wrap: wrap; border-bottom: 1px solid var(--rule); }
+nav button { background: none; border: 0; border-bottom: 2px solid transparent; padding: 8px 12px; color: var(--ink2); font: inherit; cursor: pointer; }
+nav button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+main { max-width: 1280px; margin: 0 auto; padding: 16px 24px 48px; }
+section[hidden] { display: none; }
+.card { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
+.card h2 { font-size: 15px; margin: 0 0 2px; font-weight: 620; }
+.card .note { color: var(--ink2); font-size: 13px; margin: 0 0 10px; max-width: 900px; }
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+label.ctl { color: var(--ink2); font-size: 13px; display: flex; gap: 6px; align-items: center; }
+select, input[type=checkbox] { font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 3px 6px; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { color: var(--ink2); font-weight: 560; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.scroll { overflow-x: auto; }
+svg { display: block; overflow: visible; }
+svg text { fill: var(--ink2); font-size: 11px; }
+svg .ax line, svg .ax path { stroke: var(--rule); }
+svg .gl { stroke: var(--grid); }
+.legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--ink2); margin: 2px 0 4px; min-height: 18px; }
+.legend span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.legend b { color: var(--ink); font-weight: 560; font-variant-numeric: tabular-nums; }
+.charthead { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; align-items: baseline; }
+.charthead h3 { font-size: 13px; margin: 8px 0 0; font-weight: 600; }
+.charthead .readout { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+#tip { position: fixed; pointer-events: none; background: var(--surface); color: var(--ink); border: 1px solid var(--rule); border-radius: 6px; padding: 6px 8px; font-size: 12px; box-shadow: 0 2px 10px rgba(0,0,0,.12); display: none; z-index: 10; max-width: 320px; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 14px; }
+.pill { display: inline-block; padding: 0 6px; border-radius: 9px; font-size: 11px; border: 1px solid var(--rule); color: var(--ink2); }
+.k { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+canvas { display: block; width: 100%; image-rendering: pixelated; }
+.clickable { cursor: pointer; }
+@media (max-width: 640px) { header, main { padding-left: 16px; padding-right: 16px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Phase Explorer</h1>
+  <p class="sub" id="subtitle"></p>
+  <nav role="tablist" id="tabs"></nav>
+</header>
+<main>
+  <section id="tab-overview">
+    <div class="card"><h2>Parameter sets</h2><p class="note">Each set is several seeds of the same parameters. "Filled" means the run ended in a phase with the grid at least 95% full. Fill tick is when that final phase began (quartiles).</p><div class="scroll" id="setTable"></div></div>
+    <div class="card"><h2>Phase timeline of every run</h2><p class="note">One row per run, coloured by phase class; the label in each bar names the colours above 8% of living cells. Rows are grouped by parameter set and sorted by fill tick. Click a row to open it in Run detail.</p>
+      <div class="legend" id="ganttLegend"></div><div class="scroll"><div id="gantt"></div></div></div>
+  </section>
+
+  <section id="tab-phases" hidden>
+    <div class="card"><h2>What each phase looks like</h2><p class="note">Pooled over the baseline runs, using the settled back half of each phase.</p><div class="scroll" id="classTable"></div></div>
+    <div class="grid2">
+      <div class="card"><h2>Consensus rules by empty neighbours</h2><p class="note">Share of the phase's consensus rules whose condition has 0–6 empty neighbours.</p><div class="legend" id="lgCons"></div><div id="barCons"></div></div>
+      <div class="card"><h2>Where cells are</h2><p class="note">Share of cell-ticks spent in conditions with 0–6 empty neighbours.</p><div class="legend" id="lgEnc"></div><div id="barEnc"></div></div>
+      <div class="card"><h2>Where rule deaths happen</h2><p class="note">Share of rule deaths (no rule for the condition) by empty neighbours.</p><div class="legend" id="lgDeath"></div><div id="barDeath"></div></div>
+      <div class="card"><h2>Clade sweeps by phase</h2><p class="note">Every 5,000 ticks each living cell starts its own clade. Dots: the largest clade's share of cells at the end of each window, by the phase the window ended in.</p><div id="sweepDots"></div></div>
+    </div>
+    <div class="card"><h2>Do phases have characteristic genomes?</h2><p class="note" id="simNote"></p><div class="grid2"><div id="simMatrix"></div><div id="simWithin"></div></div></div>
+    <div class="card"><h2>Core rules of each phase</h2><p class="note">Rules held by the phase consensus in at least 80% of baseline runs, after relabelling each run so its most common colour is R and the next is G.</p><div id="coreRules"></div></div>
+  </section>
+
+  <section id="tab-timing" hidden>
+    <div class="card"><h2>Order of events around the fill</h2><p class="note">For each run that filled, the tick of each event minus the fill tick (negative = before). Bar = interquartile range, tick = median, dots = runs. Hover a dot for the run.</p>
+      <div class="row"><label class="ctl">Set <select id="evSet"></select></label></div><div id="events"></div></div>
+    <div class="card"><h2>Metrics aligned on the fill</h2><p class="note">Every filled run shifted so its fill is at 0. Thin lines are runs, the thick line is the median (shown where at least 3 runs have data).</p>
+      <div class="row"><label class="ctl">Metric <select id="alMetric"></select></label><label class="ctl">Set <select id="alSet"></select></label><label class="ctl"><input type="checkbox" id="alCompare"> median of every set</label></div>
+      <div class="legend" id="alLegend"></div><div id="aligned"></div></div>
+  </section>
+
+  <section id="tab-sweep" hidden>
+    <div class="card"><h2>Time to fill by parameter set</h2><p class="note">Dots are runs; the bar is the median. Runs that never filled are marked at the right edge with an open ring.</p><div id="fillDots"></div></div>
+    <div class="card"><h2>Phase sequences and endpoints</h2><div class="scroll" id="seqTable"></div></div>
+  </section>
+
+  <section id="tab-run" hidden>
+    <div class="card">
+      <div class="row"><label class="ctl">Run <select id="runSel"></select></label><label class="ctl"><input type="checkbox" id="canon" checked> relabel colours (final dominant = R)</label><span id="runInfo" class="sub" style="margin:0"></span></div>
+      <div class="scroll" id="runPhases"></div>
+    </div>
+    <div class="card" id="runCharts"></div>
+  </section>
+</main>
+<div id="tip" role="tooltip"></div>
+<script>
+const D = /*DATA*/null;
+
+// ── helpers ────────────────────────────────────────────────────────────────
+const $ = s => document.querySelector(s);
+const NS = 'http://www.w3.org/2000/svg';
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+const fmtT = t => t == null ? '–' : (Math.abs(t) >= 1000 ? (t / 1000).toFixed(Math.abs(t) % 1000 ? 1 : 0) + 'k' : String(t));
+const fmt = (v, d = 2) => v == null || Number.isNaN(v) ? '–' : (typeof v === 'number' ? (Math.abs(v) >= 100 ? v.toFixed(0) : v.toFixed(d)) : v);
+const pct = v => v == null ? '–' : (v * 100).toFixed(0) + '%';
+const CLASS_VAR = {'3-colour churn': 'var(--p0)', '2-colour churn': 'var(--p1)', '2-colour full': 'var(--p2)'};
+const classColor = c => CLASS_VAR[c] || 'var(--pX)';
+const CELL = ['var(--cR)', 'var(--cG)', 'var(--cB)'];
+const DEAD = [0, 1, 2, 3, 4, 5, 6].map(k => `var(--s${k})`);
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v.replace(/var\((.*)\)/, '$1')).trim();
+const tip = $('#tip');
+function showTip(html, ev) { tip.innerHTML = html; tip.style.display = 'block'; const x = Math.min(ev.clientX + 14, innerWidth - tip.offsetWidth - 8); tip.style.left = x + 'px'; tip.style.top = (ev.clientY + 14) + 'px'; }
+function hideTip() { tip.style.display = 'none'; }
+function el(tag, attrs = {}, parent) { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; }
+function legend(node, items) { node.innerHTML = items.map(([name, color, val]) => `<span><i style="background:${color}"></i>${esc(name)}${val != null ? ' <b>' + val + '</b>' : ''}</span>`).join(''); }
+function niceTicks(lo, hi, n = 5) {
+  const span = hi - lo || 1, step0 = span / n, mag = 10 ** Math.floor(Math.log10(step0));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= step0);
+  const out = []; for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) out.push(+v.toFixed(10)); return out;
+}
+const width = node => Math.max(320, node.clientWidth || node.parentNode.clientWidth || 800);
+
+// Generic x-y chart. opts: {x, series:[{name,color,values,width?,dash?,area?}], stacked, yMin, yMax, log, h, bands, vlines, xFmt, yFmt, onHover}
+function chart(node, opts) {
+  node.innerHTML = '';
+  const W = width(node), H = opts.h || 150, m = {l: 44, r: 10, t: 6, b: 20};
+  const iw = W - m.l - m.r, ih = H - m.t - m.b;
+  const svg = el('svg', {width: W, height: H, viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': opts.label || 'chart'}, node);
+  const xs = opts.x, n = xs.length;
+  const xMin = opts.xMin ?? xs[0], xMax = opts.xMax ?? xs[n - 1];
+  const X = v => m.l + (xMax === xMin ? 0 : (v - xMin) / (xMax - xMin) * iw);
+  let series = opts.series;
+  let stackBase = null;
+  if (opts.stacked) {
+    const acc = new Array(n).fill(0);
+    series = series.map(s => { const lo = acc.slice(); s.values.forEach((v, i) => acc[i] += v || 0); return {...s, lo, hi: acc.slice()}; });
+  }
+  let yMin = opts.yMin, yMax = opts.yMax;
+  if (yMin == null || yMax == null) {
+    let lo = Infinity, hi = -Infinity;
+    for (const s of series) for (const v of (s.hi || s.values)) if (v != null && isFinite(v)) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+    if (yMin == null) yMin = opts.log ? Math.max(lo, 1e-6) : Math.min(0, lo);
+    if (yMax == null) yMax = hi === -Infinity ? 1 : hi * (opts.log ? 1.3 : 1.05);
+  }
+  const ly = v => Math.log10(Math.max(v, yMin));
+  const Y = opts.log ? v => m.t + ih - (ly(v) - Math.log10(yMin)) / (Math.log10(yMax) - Math.log10(yMin) || 1) * ih
+                     : v => m.t + ih - (v - yMin) / (yMax - yMin || 1) * ih;
+  // phase bands
+  if (opts.bands) for (const b of opts.bands) {
+    const x0 = X(Math.max(xMin, b.from)), x1 = X(Math.min(xMax, b.to));
+    if (x1 > x0) { const r = el('rect', {x: x0, y: m.t, width: x1 - x0, height: ih, fill: b.color, opacity: 0.09}, svg); }
+  }
+  // grid + axes
+  const yt = opts.log ? [1, 10, 100, 1000, 10000].filter(v => v >= yMin && v <= yMax) : niceTicks(yMin, yMax, Math.max(2, Math.round(ih / 32)));
+  for (const v of yt) { el('line', {x1: m.l, x2: m.l + iw, y1: Y(v), y2: Y(v), class: 'gl'}, svg); el('text', {x: m.l - 6, y: Y(v) + 3.5, 'text-anchor': 'end'}, svg).textContent = (opts.yFmt || (z => fmt(z, z < 1 ? 2 : 0)))(v); }
+  const xt = niceTicks(xMin, xMax, Math.max(2, Math.round(iw / 90)));
+  for (const v of xt) el('text', {x: X(v), y: H - 5, 'text-anchor': 'middle'}, svg).textContent = (opts.xFmt || fmtT)(v);
+  el('line', {x1: m.l, x2: m.l + iw, y1: m.t + ih, y2: m.t + ih, stroke: 'var(--rule)'}, svg);
+  if (opts.vlines) for (const v of opts.vlines) if (v.x >= xMin && v.x <= xMax) el('line', {x1: X(v.x), x2: X(v.x), y1: m.t, y2: m.t + ih, stroke: v.color || 'var(--ink2)', 'stroke-dasharray': '3 3', 'stroke-width': 1}, svg);
+  // marks
+  for (const s of series) {
+    const pts = [];
+    if (s.lo) {
+      let d = '';
+      for (let i = 0; i < n; i++) d += (i ? 'L' : 'M') + X(xs[i]).toFixed(1) + ',' + Y(s.hi[i]).toFixed(1);
+      for (let i = n - 1; i >= 0; i--) d += 'L' + X(xs[i]).toFixed(1) + ',' + Y(s.lo[i]).toFixed(1);
+      el('path', {d: d + 'Z', fill: s.color, stroke: 'var(--surface)', 'stroke-width': 0.6}, svg);
+      continue;
+    }
+    if (s.band) {
+      let d = '';
+      for (let i = 0; i < n; i++) d += (i ? 'L' : 'M') + X(xs[i]).toFixed(1) + ',' + Y(s.band[1][i]).toFixed(1);
+      for (let i = n - 1; i >= 0; i--) d += 'L' + X(xs[i]).toFixed(1) + ',' + Y(s.band[0][i]).toFixed(1);
+      el('path', {d: d + 'Z', fill: s.color, opacity: 0.18}, svg);
+    }
+    if (s.bars) {
+      for (let i = 0; i < n; i++) if (s.values[i] != null) {
+        const bw = Math.max(2, iw / (xMax - xMin) * s.bars - 2);
+        el('rect', {x: X(xs[i]) - bw, y: Y(s.values[i]), width: bw, height: Math.max(0, Y(yMin) - Y(s.values[i])), fill: s.color, rx: 1.5}, svg);
+      }
+      continue;
+    }
+    let d = '', pen = false;
+    for (let i = 0; i < n; i++) {
+      const v = s.values[i];
+      if (v == null || (opts.log && v <= 0)) { pen = false; continue; }
+      d += (pen ? 'L' : 'M') + X(xs[i]).toFixed(1) + ',' + Y(v).toFixed(1); pen = true;
+    }
+    el('path', {d, fill: 'none', stroke: s.color, 'stroke-width': s.width || 2, 'stroke-dasharray': s.dash || '', opacity: s.opacity ?? 1, 'stroke-linejoin': 'round'}, svg);
+  }
+  // hover layer
+  const cross = el('line', {y1: m.t, y2: m.t + ih, stroke: 'var(--ink2)', 'stroke-width': 1, visibility: 'hidden'}, svg);
+  const hit = el('rect', {x: m.l, y: m.t, width: iw, height: ih, fill: 'transparent'}, svg);
+  const api = {
+    show(i) { if (i == null || i < 0) { cross.setAttribute('visibility', 'hidden'); return; } const x = X(xs[i]); cross.setAttribute('x1', x); cross.setAttribute('x2', x); cross.setAttribute('visibility', 'visible'); },
+  };
+  const idxAt = ev => { const r = svg.getBoundingClientRect(); const xv = xMin + (ev.clientX - r.left - m.l) / iw * (xMax - xMin); let best = 0; for (let i = 1; i < n; i++) if (Math.abs(xs[i] - xv) < Math.abs(xs[best] - xv)) best = i; return best; };
+  hit.addEventListener('mousemove', ev => { const i = idxAt(ev); if (opts.onHover) opts.onHover(i, ev); else api.show(i); });
+  hit.addEventListener('mouseleave', () => { if (opts.onHover) opts.onHover(null); else api.show(null); hideTip(); });
+  if (opts.onClick) hit.addEventListener('click', ev => opts.onClick(idxAt(ev)));
+  return api;
+}
+
+// Grouped bars: categories along x, one bar per group.
+function groupedBars(node, cats, groups, opts = {}) {
+  node.innerHTML = '';
+  const W = width(node), H = opts.h || 170, m = {l: 40, r: 8, t: 8, b: 30};
+  const iw = W - m.l - m.r, ih = H - m.t - m.b;
+  const svg = el('svg', {width: W, height: H, role: 'img', 'aria-label': opts.label || 'bar chart'}, node);
+  let max = 0; for (const g of groups) for (const v of g.values) max = Math.max(max, v || 0);
+  max = opts.yMax || max * 1.08 || 1;
+  const Y = v => m.t + ih - v / max * ih;
+  for (const v of niceTicks(0, max, 4)) { el('line', {x1: m.l, x2: m.l + iw, y1: Y(v), y2: Y(v), class: 'gl'}, svg); el('text', {x: m.l - 6, y: Y(v) + 3.5, 'text-anchor': 'end'}, svg).textContent = opts.pct ? Math.round(v * 100) + '%' : fmt(v); }
+  const cw = iw / cats.length, bw = Math.max(3, (cw - 10) / groups.length - 2);
+  cats.forEach((c, ci) => {
+    el('text', {x: m.l + ci * cw + cw / 2, y: H - 14, 'text-anchor': 'middle'}, svg).textContent = c;
+    groups.forEach((g, gi) => {
+      const v = g.values[ci] || 0, x = m.l + ci * cw + 5 + gi * (bw + 2);
+      const r = el('rect', {x, y: Y(v), width: bw, height: Math.max(0, Y(0) - Y(v)), fill: g.color, rx: 2}, svg);
+      const h = el('rect', {x: x - 1, y: m.t, width: bw + 2, height: ih, fill: 'transparent'}, svg);
+      h.addEventListener('mousemove', ev => showTip(`<b>${esc(g.name)}</b><br>${esc(c)}: ${opts.pct ? pct(v) : fmt(v)}`, ev));
+      h.addEventListener('mouseleave', hideTip);
+    });
+  });
+  if (opts.xTitle) el('text', {x: m.l + iw / 2, y: H - 1, 'text-anchor': 'middle'}, svg).textContent = opts.xTitle;
+  el('line', {x1: m.l, x2: m.l + iw, y1: Y(0), y2: Y(0), stroke: 'var(--rule)'}, svg);
+}
+
+// Horizontal dot/strip plot. rows: [{name, color, dots:[{v, label, hollow}], q:[q1,med,q3]}]
+function dotRows(node, rows, opts = {}) {
+  node.innerHTML = '';
+  const W = width(node), rh = opts.rowH || 30, m = {l: opts.left || 150, r: 14, t: 6, b: 24};
+  const H = m.t + rows.length * rh + m.b, iw = W - m.l - m.r;
+  const svg = el('svg', {width: W, height: H, role: 'img', 'aria-label': opts.label || 'dot plot'}, node);
+  const xMin = opts.xMin, xMax = opts.xMax, X = v => m.l + (v - xMin) / (xMax - xMin) * iw;
+  for (const v of niceTicks(xMin, xMax, Math.round(iw / 80))) { el('line', {x1: X(v), x2: X(v), y1: m.t, y2: H - m.b, class: 'gl'}, svg); el('text', {x: X(v), y: H - 6, 'text-anchor': 'middle'}, svg).textContent = (opts.xFmt || fmtT)(v); }
+  if (opts.zero != null) el('line', {x1: X(opts.zero), x2: X(opts.zero), y1: m.t, y2: H - m.b, stroke: 'var(--ink2)', 'stroke-dasharray': '3 3'}, svg);
+  rows.forEach((r, ri) => {
+    const cy = m.t + ri * rh + rh / 2;
+    el('text', {x: m.l - 10, y: cy + 4, 'text-anchor': 'end'}, svg).textContent = r.name;
+    if (r.q) {
+      el('rect', {x: X(r.q[0]), y: cy - 7, width: Math.max(1, X(r.q[2]) - X(r.q[0])), height: 14, fill: r.color, opacity: 0.16, rx: 3}, svg);
+      el('line', {x1: X(r.q[1]), x2: X(r.q[1]), y1: cy - 9, y2: cy + 9, stroke: r.color, 'stroke-width': 3}, svg);
+    }
+    r.dots.forEach((d, di) => {
+      const jitter = ((di * 7919) % 11 - 5) * 0.9;
+      const c = el('circle', {cx: X(Math.max(xMin, Math.min(xMax, d.v))), cy: cy + jitter, r: 4, fill: d.hollow ? 'var(--surface)' : r.color, stroke: d.hollow ? r.color : 'var(--surface)', 'stroke-width': d.hollow ? 1.5 : 1, class: opts.onClick ? 'clickable' : ''}, svg);
+      c.addEventListener('mousemove', ev => showTip(d.label, ev));
+      c.addEventListener('mouseleave', hideTip);
+      if (opts.onClick && d.run) c.addEventListener('click', () => opts.onClick(d.run));
+    });
+  });
+}
+
+// ── tabs ──────────────────────────────────────────────────────────────────
+const TABS = [['overview', 'Overview'], ['phases', 'Phases'], ['timing', 'Timing'], ['sweep', 'Parameter sweep'], ['run', 'Run detail']];
+const rendered = {};
+function openTab(id) {
+  for (const [t] of TABS) { $('#tab-' + t).hidden = t !== id; $(`#tabs [data-t="${t}"]`).setAttribute('aria-selected', t === id); }
+  if (!rendered[id]) { rendered[id] = true; RENDER[id](); }
+  try { localStorage.setItem('phaseExplorerTab', id); } catch (e) {}
+}
+$('#tabs').innerHTML = TABS.map(([t, n]) => `<button role="tab" data-t="${t}">${n}</button>`).join('');
+$('#tabs').addEventListener('click', e => { const t = e.target.dataset.t; if (t) openTab(t); });
+
+const runByName = new Map(D.runs.map(r => [r.name, r]));
+const baseSet = D.sets[0].name;
+$('#subtitle').textContent = `${D.runs.length} runs in ${D.sets.length} parameter sets · baseline set "${baseSet}" · 3 colours, ${D.conditions.length} conditions`;
+
+function openRun(name) { $('#runSel').value = name; openTab('run'); renderRun(); }
+
+// ── overview ───────────────────────────────────────────────────────────────
+const RENDER = {};
+RENDER.overview = () => {
+  const paramText = p => Object.keys(p).length ? Object.entries(p).map(([k, v]) => `${k} = ${v}`).join(', ') : 'defaults';
+  $('#setTable').innerHTML = `<table><thead><tr><th>Set</th><th>Parameters</th><th class="num">Runs</th><th class="num">Filled</th><th class="num">Extinct</th><th class="num">Fill tick (q1 / median / q3)</th><th class="num">3-colour phase</th><th class="num">Final genome size</th><th>Endpoints</th></tr></thead><tbody>` +
+    D.sets.map(s => `<tr><td>${esc(s.name)}</td><td>${esc(paramText(s.params))}</td><td class="num">${s.runs}</td><td class="num">${s.filled}</td><td class="num">${s.extinct}</td><td class="num">${s.fillQuartiles ? s.fillQuartiles.map(fmtT).join(' / ') : '–'}</td><td class="num">${s.threeColourTicks ? fmtT(s.threeColourTicks[1]) : '–'}</td><td class="num">${s.finalGenome ? fmt(s.finalGenome[1], 1) : '–'}</td><td>${s.endpoints.map(([e, c]) => `${esc(e)} <span class="pill">${c}</span>`).join(' ')}</td></tr>`).join('') + '</tbody></table>';
+  legend($('#ganttLegend'), [['3-colour churn', classColor('3-colour churn')], ['2-colour churn', classColor('2-colour churn')], ['2-colour full', classColor('2-colour full')], ['other', classColor('x')], ['fill', 'var(--ink)']]);
+  const node = $('#gantt'); node.innerHTML = '';
+  const order = [];
+  for (const s of D.sets) order.push({header: s.name}, ...D.runs.filter(r => r.set === s.name).sort((a, b) => (a.fillTick ?? 1e9) - (b.fillTick ?? 1e9)));
+  const W = Math.max(720, width(node)), rh = 16, m = {l: 120, r: 70, t: 4, b: 22};
+  const H = m.t + order.length * rh + m.b, iw = W - m.l - m.r;
+  const tMax = Math.max(...D.runs.map(r => r.series.tick[r.series.tick.length - 1]));
+  const X = t => m.l + t / tMax * iw;
+  const svg = el('svg', {width: W, height: H, role: 'img', 'aria-label': 'phase timeline per run'}, node);
+  for (const v of niceTicks(0, tMax, Math.round(iw / 90))) { el('line', {x1: X(v), x2: X(v), y1: m.t, y2: H - m.b, class: 'gl'}, svg); el('text', {x: X(v), y: H - 6, 'text-anchor': 'middle'}, svg).textContent = fmtT(v); }
+  order.forEach((r, i) => {
+    const y = m.t + i * rh;
+    if (r.header) { el('text', {x: 4, y: y + 12, style: 'font-weight:600;fill:var(--ink)'}, svg).textContent = r.header; return; }
+    el('text', {x: m.l - 8, y: y + 11.5, 'text-anchor': 'end'}, svg).textContent = 's' + r.seed;
+    const g = el('g', {class: 'clickable'}, svg);
+    for (const p of r.phases) {
+      const x0 = X(p.startTick - 1000), x1 = X(p.endTick);
+      el('rect', {x: x0 + 0.5, y: y + 2, width: Math.max(1, x1 - x0 - 1), height: rh - 4, fill: classColor(p.cls), rx: 2}, g);
+      if (x1 - x0 > 26) el('text', {x: x0 + 4, y: y + 11.5, style: 'fill:#fff;font-size:10px;font-weight:600'}, g).textContent = p.label.replace(' full', '■');
+    }
+    if (r.fillTick != null) el('line', {x1: X(r.fillTick), x2: X(r.fillTick), y1: y, y2: y + rh, stroke: 'var(--ink)', 'stroke-width': 2}, g);
+    el('text', {x: W - m.r + 6, y: y + 11.5}, svg).textContent = r.endpoint;
+    const hit = el('rect', {x: m.l, y, width: iw, height: rh, fill: 'transparent'}, g);
+    hit.addEventListener('mousemove', ev => {
+      const r0 = svg.getBoundingClientRect(), t = (ev.clientX - r0.left - m.l) / iw * tMax;
+      const p = r.phases.find(p => t >= p.startTick - 1000 && t <= p.endTick) || r.phases[r.phases.length - 1];
+      showTip(`<b>${esc(r.name)}</b><br>${esc(p.label)} (${esc(p.cls)})<br>${fmtT(p.startTick)}–${fmtT(p.endTick)} · genome ${fmt(p.summary.meanGenome, 1)} · pop ${pct(p.summary.pop)}<br>fill ${fmtT(r.fillTick)} · ends ${esc(r.endpoint)}`, ev);
+    });
+    hit.addEventListener('mouseleave', hideTip);
+    hit.addEventListener('click', () => openRun(r.name));
+  });
+};
+
+// ── phases ────────────────────────────────────────────────────────────────
+RENDER.phases = () => {
+  const C = D.phaseClasses;
+  const q = a => a ? `${fmtT(a[0])}–${fmtT(a[2])} (med ${fmtT(a[1])})` : '–';
+  const rows = [
+    ['Phases (runs)', c => `${c.phases} (${c.runs})`], ['Duration', c => q(c.durationTicks)], ['Living cells', c => pct(c.pop)],
+    ['Mean genome size (rules)', c => fmt(c.meanGenome, 1)], ['Genome size p10 / p50 / p90', c => c.genomeSizeQ.map(v => fmt(v, 0)).join(' / ')],
+    ['Consensus genome size', c => fmt(c.consensusSize, 1)], ['Consensus rules for fully surrounded cells', c => pct(c.surroundShare)],
+    ['Self-loop rules', c => pct(c.selfLoop)], ['Births per tick', c => fmt(c.births, 1)], ['Rule deaths per tick', c => fmt(c.ruleDeaths, 1)],
+    ['Effective number of genomes', c => fmt(c.shannonGenomes, 0)], ['Cells matching consensus (per condition)', c => pct(c.consensusAgreement)],
+    ['Mean rules differing from consensus', c => fmt(c.meanDistFromConsensus, 1)], ['Same-colour neighbour share (clustering)', c => fmt(c.cluster, 2)],
+    ['5k windows with a clade sweep (≥50%)', c => c.sweepShare == null ? '–' : `${pct(c.sweepShare)} of ${c.cladeWindows}`],
+  ];
+  $('#classTable').innerHTML = `<table><thead><tr><th></th>${C.map(c => `<th class="num"><i style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${classColor(c.cls)}"></i> ${esc(c.cls)}</th>`).join('')}</tr></thead><tbody>` +
+    rows.map(([n, f]) => `<tr><td>${n}</td>${C.map(c => `<td class="num">${f(c)}</td>`).join('')}</tr>`).join('') + '</tbody></table>';
+  const cats = ['0', '1', '2', '3', '4', '5', '6'];
+  const groups = key => C.filter(c => CLASS_VAR[c.cls]).map(c => ({name: c.cls, color: classColor(c.cls), values: c[key]}));
+  for (const [key, node, lg] of [['consByDead', '#barCons', '#lgCons'], ['encByDead', '#barEnc', '#lgEnc'], ['deathByDead', '#barDeath', '#lgDeath']]) {
+    legend($(lg), groups(key).map(g => [g.name, g.color]));
+    groupedBars($(node), cats, groups(key), {pct: true, xTitle: 'empty neighbours'});
+  }
+  // sweep dots by phase class
+  const base = D.runs.filter(r => r.set === baseSet);
+  const sweepRows = C.filter(c => CLASS_VAR[c.cls]).map(c => ({name: c.cls, color: classColor(c.cls), q: c.topCladeShare,
+    dots: base.flatMap(r => r.windows.filter(w => w.cls === c.cls).map(w => ({v: w.topShare, run: r.name, label: `${esc(r.name)}<br>window ${fmtT(w.start)}–${fmtT(w.end)}<br>largest clade ${pct(w.topShare)} · ${w.clades} clades`})))}));
+  dotRows($('#sweepDots'), sweepRows, {xMin: 0, xMax: 1, xFmt: v => Math.round(v * 100) + '%', left: 110, rowH: 46, onClick: openRun});
+  // similarity
+  const S = D.similarity;
+  $('#simNote').innerHTML = `Each phase's consensus genome (majority rule per condition over its settled half) is compared with every other run's, as the share of rules that agree among conditions either genome has a rule for, taking the best of the six colour relabelings. If phases have characteristic genomes, the diagonal (same phase, different runs) should beat the off-diagonal (different phases).`;
+  const cl = S.classes, n = cl.length, cell = 92, left = 120, top = 26;
+  const node = $('#simMatrix'); node.innerHTML = '';
+  const svg = el('svg', {width: left + n * cell + 4, height: top + n * cell + 4, role: 'img', 'aria-label': 'phase genome similarity matrix'}, node);
+  const seq = v => { const k = Math.max(0, Math.min(6, Math.round((1 - v) / 0.1 - 1))); return DEAD[k]; };
+  cl.forEach((c, i) => {
+    el('text', {x: left + i * cell + cell / 2, y: 16, 'text-anchor': 'middle'}, svg).textContent = c;
+    el('text', {x: left - 8, y: top + i * cell + cell / 2 + 4, 'text-anchor': 'end'}, svg).textContent = c;
+    cl.forEach((d, j) => {
+      const v = S.matrix[i][j];
+      const r = el('rect', {x: left + j * cell + 1, y: top + i * cell + 1, width: cell - 2, height: cell - 2, rx: 4, fill: v ? seq(v.mean) : 'var(--none)'}, svg);
+      const t = el('text', {x: left + j * cell + cell / 2, y: top + i * cell + cell / 2 + 4, 'text-anchor': 'middle', style: `font-size:14px;font-weight:600;fill:${v && v.mean > 0.55 ? '#fff' : 'var(--ink)'}`}, svg);
+      t.textContent = v ? pct(v.mean) : '–';
+      r.addEventListener('mousemove', ev => showTip(v ? `<b>${esc(c)} vs ${esc(d)}</b><br>mean ${pct(v.mean)} · q1–q3 ${pct(v.q[0])}–${pct(v.q[2])}<br>${v.n} pairs from different runs` : 'no pairs', ev));
+      r.addEventListener('mouseleave', hideTip);
+    });
+  });
+  const wr = S.withinRunAcrossPhases;
+  const grp = {}; for (const w of wr) { const k = `${w.a} → ${w.b}`; (grp[k] = grp[k] || []).push(w.sim); }
+  $('#simWithin').innerHTML = `<p class="note">Within the same run, each pair of different phases:</p><table><thead><tr><th>Pair</th><th class="num">Pairs</th><th class="num">Mean similarity</th></tr></thead><tbody>${Object.entries(grp).map(([k, v]) => `<tr><td>${esc(k)}</td><td class="num">${v.length}</td><td class="num">${pct(v.reduce((a, b) => a + b, 0) / v.length)}</td></tr>`).join('')}</tbody></table>`;
+  $('#coreRules').innerHTML = S.coreRules.map(c => `<h3 style="font-size:13px;margin:10px 0 4px"><i style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${classColor(c.cls)}"></i> ${esc(c.cls)} <span class="pill">${c.rules.length} rules · ${c.runs} runs</span></h3>` +
+    (c.rules.length ? `<table><thead><tr><th>Rule</th><th class="num">Empty neighbours</th><th class="num">Runs</th></tr></thead><tbody>${c.rules.sort((a, b) => a.nDead - b.nDead || b.share - a.share).map(r => `<tr><td class="k">${esc(r.text)}</td><td class="num">${r.nDead}</td><td class="num">${pct(r.share)}</td></tr>`).join('')}</tbody></table>` : '<p class="note">none</p>')).join('');
+};
+
+// ── timing ────────────────────────────────────────────────────────────────
+const EV_NAMES = {thirdColourLost: 'Third colour lost', pop80: 'Population reaches 80%', surroundMajority: 'Consensus mostly surrounded-cell rules', genomeHalfway: 'Genome size halfway down', ruleDeathsCollapse: 'Rule deaths < 10% of churn level', velocityPeak: 'Rule-space velocity peak', nearestSweep: 'Nearest clade sweep', lastFounder: 'One founder left'};
+const AL_NAMES = {pop: 'Living cells (share)', meanGenome: 'Mean genome size', consensusSize: 'Consensus genome size', surroundShare: 'Consensus share: fully surrounded rules', ruleDeaths: 'Rule deaths per tick', births: 'Births per tick', shannonGenomes: 'Effective number of genomes', velocity: 'Rule-space velocity', topCladeShare: 'Largest clade share (5k windows)', selfLoop: 'Self-loop rules', consensusAgreement: 'Cells matching consensus', cluster: 'Same-colour neighbour share'};
+RENDER.timing = () => {
+  const sets = D.sets.filter(s => s.filled);
+  $('#evSet').innerHTML = sets.map(s => `<option>${esc(s.name)}</option>`).join('');
+  $('#alSet').innerHTML = sets.map(s => `<option>${esc(s.name)}</option>`).join('');
+  $('#alMetric').innerHTML = Object.entries(AL_NAMES).map(([k, n]) => `<option value="${k}">${esc(n)}</option>`).join('');
+  $('#evSet').onchange = drawEvents; $('#alSet').onchange = drawAligned; $('#alMetric').onchange = drawAligned; $('#alCompare').onchange = drawAligned;
+  drawEvents(); drawAligned();
+};
+function eventsFor(setName) {
+  const rs = D.runs.filter(r => r.set === setName && r.filled);
+  return Object.keys(EV_NAMES).map(k => {
+    const v = rs.map(r => ({v: r.events[k], run: r.name})).filter(d => d.v != null);
+    const s = v.map(d => d.v).sort((a, b) => a - b), qq = p => s[Math.min(s.length - 1, Math.floor(p * (s.length - 1) + 0.5))];
+    return {k, v, q: s.length ? [qq(0.25), qq(0.5), qq(0.75)] : null};
+  });
+}
+function drawEvents() {
+  const ev = eventsFor($('#evSet').value);
+  const all = ev.flatMap(e => e.v.map(d => d.v));
+  const lo = Math.min(-5000, ...all), hi = Math.max(5000, ...all);
+  dotRows($('#events'), ev.map(e => ({name: EV_NAMES[e.k] + ` (${e.v.length})`, color: 'var(--accent)', q: e.q,
+    dots: e.v.map(d => ({v: d.v, run: d.run, label: `<b>${esc(d.run)}</b><br>${esc(EV_NAMES[e.k])}: ${d.v > 0 ? '+' : ''}${fmtT(d.v)} ticks from fill`}))})),
+    {xMin: lo, xMax: hi, zero: 0, left: 260, onClick: openRun, xFmt: v => (v > 0 ? '+' : '') + fmtT(v)});
+}
+function drawAligned() {
+  const metric = $('#alMetric').value, A = D.aligned, set = $('#alSet').value;
+  const compare = $('#alCompare').checked;
+  const node = $('#aligned');
+  const series = [];
+  if (compare) {
+    const PAL = ['var(--p0)', 'var(--p1)', 'var(--p2)', 'var(--cB)', 'var(--cR)', 'var(--cG)', 'var(--ink2)'];
+    Object.keys(A.sets).forEach((s, i) => series.push({name: s, color: i < 7 ? PAL[i] : 'var(--pX)', values: A.sets[s][metric].median, width: 2}));
+  } else {
+    const m = A.sets[set][metric];
+    m.perRun.forEach((v, i) => series.push({name: m.runs[i], color: 'var(--ink2)', values: v, width: 1, opacity: 0.25}));
+    series.push({name: 'median', color: 'var(--accent)', values: m.median, width: 3});
+  }
+  const shown = compare ? series : series.slice(-1);
+  legend($('#alLegend'), shown.map(s => [s.name, s.color, null]));
+  chart(node, {x: A.offsets, series, h: 260, vlines: [{x: 0}], xFmt: v => (v > 0 ? '+' : '') + fmtT(v), label: AL_NAMES[metric] + ' aligned on fill', log: metric === 'shannonGenomes',
+    onHover(i, ev) { if (i == null) { hideTip(); legend($('#alLegend'), shown.map(s => [s.name, s.color, null])); return; }
+      legend($('#alLegend'), shown.map(s => [s.name, s.color, fmt(s.values[i], 3)]));
+      if (ev) showTip(`${(A.offsets[i] > 0 ? '+' : '') + fmtT(A.offsets[i])} from fill<br>${shown.map(s => `${esc(s.name)}: <b>${fmt(s.values[i], 3)}</b>`).join('<br>')}`, ev); }});
+}
+
+// ── parameter sweep ──────────────────────────────────────────────────────
+RENDER.sweep = () => {
+  const tMax = Math.max(...D.runs.map(r => r.series.tick[r.series.tick.length - 1]));
+  dotRows($('#fillDots'), D.sets.map((s, i) => ({name: s.name, color: i === 0 ? 'var(--accent)' : 'var(--p1)', q: s.fillQuartiles,
+    dots: D.runs.filter(r => r.set === s.name).map(r => ({v: r.filled ? r.fillTick : tMax, hollow: !r.filled, run: r.name, label: `<b>${esc(r.name)}</b><br>${r.filled ? 'filled at ' + fmtT(r.fillTick) : 'did not fill by ' + fmtT(r.ticks)} · ${esc(r.endpoint)}`}))})),
+    {xMin: 0, xMax: tMax, left: 120, onClick: openRun});
+  $('#seqTable').innerHTML = `<table><thead><tr><th>Set</th><th>Phase-class sequences (runs)</th><th>Endpoints</th><th class="num">Final genome size</th><th class="num">Final surrounded-rule share</th></tr></thead><tbody>` +
+    D.sets.map(s => `<tr><td>${esc(s.name)}</td><td>${s.classSequences.map(([q, c]) => `${esc(q)} <span class="pill">${c}</span>`).join('<br>')}</td><td>${s.endpoints.map(([e, c]) => `${esc(e)} <span class="pill">${c}</span>`).join(' ')}</td><td class="num">${s.finalGenome ? s.finalGenome.map(v => fmt(v, 0)).join(' / ') : '–'}</td><td class="num">${s.finalSurround ? s.finalSurround.map(pct).join(' / ') : '–'}</td></tr>`).join('') + '</tbody></table>';
+};
+
+// ── run detail ──────────────────────────────────────────────────────────
+RENDER.run = () => {
+  $('#runSel').innerHTML = D.sets.map(s => `<optgroup label="${esc(s.name)}">${D.runs.filter(r => r.set === s.name).map(r => `<option>${esc(r.name)}</option>`).join('')}</optgroup>`).join('');
+  $('#runSel').onchange = renderRun; $('#canon').onchange = renderRun;
+  renderRun();
+};
+function renderRun() {
+  const r = runByName.get($('#runSel').value) || D.runs[0];
+  const s = r.series, x = s.tick, n = x.length;
+  $('#runInfo').textContent = `seed ${r.seed} · ${fmtT(r.ticks)} ticks · ${r.stopReason || ''} · fill ${fmtT(r.fillTick)} · ends ${r.endpoint}`;
+  $('#runPhases').innerHTML = `<table><thead><tr><th>Phase</th><th>Class</th><th class="num">Ticks</th><th class="num">Pop</th><th class="num">Genome</th><th class="num">Consensus</th><th class="num">Surrounded rules</th><th class="num">Births/tick</th><th class="num">Rule deaths/tick</th><th class="num">Eff. genomes</th></tr></thead><tbody>` +
+    r.phases.map(p => `<tr><td>${esc(p.label)}</td><td><i style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${classColor(p.cls)}"></i> ${esc(p.cls)}</td><td class="num">${fmtT(p.startTick)}–${fmtT(p.endTick)}</td><td class="num">${pct(p.summary.pop)}</td><td class="num">${fmt(p.summary.meanGenome, 1)}</td><td class="num">${fmt(p.summary.consensusSize, 0)}</td><td class="num">${pct(p.summary.surroundShare)}</td><td class="num">${fmt(p.summary.births, 1)}</td><td class="num">${fmt(p.summary.ruleDeaths, 1)}</td><td class="num">${fmt(p.summary.shannonGenomes, 0)}</td></tr>`).join('') + '</tbody></table>';
+  const bands = r.phases.map(p => ({from: p.startTick - 1000, to: p.endTick, color: classColor(p.cls)}));
+  const vlines = r.fillTick != null ? [{x: r.fillTick}] : [];
+  const host = $('#runCharts'); host.innerHTML = '';
+  const charts = [];
+  const add = (title, legendItems, opts, readout) => {
+    const wrap = document.createElement('div');
+    wrap.innerHTML = `<div class="charthead"><h3>${esc(title)}</h3><span class="readout"></span></div><div class="legend"></div><div class="plot"></div>`;
+    host.appendChild(wrap);
+    const lg = wrap.querySelector('.legend'), ro = wrap.querySelector('.readout');
+    legend(lg, legendItems.map(([a, b]) => [a, b, null]));
+    const api = chart(wrap.querySelector('.plot'), {x, bands, vlines, ...opts, onHover: i => sync(i)});
+    charts.push({api, update(i) { legend(lg, legendItems.map(([a, b, f]) => [a, b, i == null ? null : f(i)])); ro.textContent = i == null ? '' : 'tick ' + fmtT(x[i]) + (readout ? ' · ' + readout(i) : ''); }});
+  };
+  const sync = i => { for (const c of charts) { c.api.show(i); c.update(i); } strip.show(i); };
+  const perm = r.canonPerm && $('#canon').checked ? r.canonPerm : 'RGB';
+  // colour k is shown as label perm[k] when relabelled
+  const colLab = k => perm[k];
+  const colOrder = [0, 1, 2].sort((a, b) => 'RGB'.indexOf(colLab(a)) - 'RGB'.indexOf(colLab(b)));
+  add('Living cells by colour', colOrder.map(k => [colLab(k), CELL['RGB'.indexOf(colLab(k))], i => pct(s.colors[k][i] * s.pop[i])]),
+    {series: colOrder.map(k => ({name: colLab(k), color: CELL['RGB'.indexOf(colLab(k))], values: s.colors[k].map((v, i) => v * s.pop[i])})), stacked: true, yMin: 0, yMax: 1, yFmt: v => Math.round(v * 100) + '%', h: 120},
+    i => 'alive ' + pct(s.pop[i]));
+  add('Genome size (rules per genome)', [['mean', 'var(--accent)', i => fmt(s.meanGenome[i], 1)], ['p10–p90', 'var(--accent)', i => s.genomeSizeQ[i][0] + '–' + s.genomeSizeQ[i][2]], ['consensus', 'var(--ink2)', i => s.consensusSize[i]]],
+    {series: [{name: 'mean', color: 'var(--accent)', values: s.meanGenome, band: [s.genomeSizeQ.map(q => q[0]), s.genomeSizeQ.map(q => q[2])]}, {name: 'consensus', color: 'var(--ink2)', values: s.consensusSize, dash: '4 3'}], yMin: 0});
+  const dead = [0, 1, 2, 3, 4, 5, 6];
+  const share = arr => { const t = arr.reduce((a, b) => a + b, 0); return arr.map(v => t ? v / t : 0); };
+  const consShare = s.consByDead.map(share);
+  add('Consensus rules by empty neighbours (share)', dead.map(k => [k + ' empty', DEAD[k], i => pct(consShare[i][k])]),
+    {series: dead.map(k => ({name: k, color: DEAD[k], values: consShare.map(a => a[k])})), stacked: true, yMin: 0, yMax: 1, yFmt: v => Math.round(v * 100) + '%', h: 120});
+  add('Where cells are: encounters by empty neighbours', dead.map(k => [k + ' empty', DEAD[k], i => pct(s.encByDead[i][k])]),
+    {series: dead.map(k => ({name: k, color: DEAD[k], values: s.encByDead.map(a => a[k])})), stacked: true, yMin: 0, yMax: 1, yFmt: v => Math.round(v * 100) + '%', h: 120});
+  add('Where rule deaths happen, by empty neighbours', dead.map(k => [k + ' empty', DEAD[k], i => pct(s.deathByDead[i][k])]),
+    {series: dead.map(k => ({name: k, color: DEAD[k], values: s.deathByDead.map(a => a[k])})), stacked: true, yMin: 0, yMax: 1, yFmt: v => Math.round(v * 100) + '%', h: 120});
+  add('Births and deaths per tick', [['births', 'var(--p2)', i => fmt(s.births[i], 1)], ['rule deaths', 'var(--p0)', i => fmt(s.ruleDeaths[i], 1)], ['random deaths', 'var(--ink2)', i => fmt(s.randomDeaths[i], 1)]],
+    {series: [{name: 'births', color: 'var(--p2)', values: s.births}, {name: 'rule deaths', color: 'var(--p0)', values: s.ruleDeaths}, {name: 'random', color: 'var(--ink2)', values: s.randomDeaths, dash: '4 3', width: 1.5}], yMin: 0});
+  add('Genetic diversity: effective number of genomes (log)', [['effective genomes (Shannon)', 'var(--p1)', i => fmt(s.shannonGenomes[i], 0)], ['distinct genomes', 'var(--ink2)', i => s.distinctGenomes[i]]],
+    {series: [{name: 'eff', color: 'var(--p1)', values: s.shannonGenomes}, {name: 'distinct', color: 'var(--ink2)', values: s.distinctGenomes, dash: '4 3', width: 1.5}], log: true, yMin: 1, yMax: 10000});
+  const winEnd = new Array(n).fill(null);
+  for (const w of r.windows) { const i = x.indexOf(w.end); if (i >= 0) winEnd[i] = w.topShare; }
+  add('Largest clade at the end of each 5k window', [['largest clade share', 'var(--p0)', i => winEnd[i] == null ? pct(s.topCladeShare[i]) + ' (in window)' : pct(winEnd[i])], ['founders alive', 'var(--ink2)', i => s.foundersAlive[i]]],
+    {series: [{name: 'in-window', color: 'var(--p0)', values: s.topCladeShare, width: 1, opacity: 0.4}, {name: 'end', color: 'var(--p0)', values: winEnd, bars: 5000 / ((x[1] - x[0]) || 1000) * ((x[1] - x[0]) || 1000) / 1.6}], yMin: 0, yMax: 1, yFmt: v => Math.round(v * 100) + '%', h: 120});
+  add('Rule-space velocity (change of the rule distribution per sample)', [['velocity', 'var(--accent)', i => fmt(s.velocity[i], 4)]],
+    {series: [{name: 'v', color: 'var(--accent)', values: s.velocity}], yMin: 0, yFmt: v => v.toFixed(3), h: 110});
+  add('Consensus coherence', [['cells matching consensus', 'var(--p2)', i => pct(s.consensusAgreement[i])], ['self-loop rules', 'var(--p1)', i => pct(s.selfLoop[i])], ['same-colour neighbours', 'var(--ink2)', i => fmt(s.cluster[i], 2)]],
+    {series: [{name: 'agree', color: 'var(--p2)', values: s.consensusAgreement}, {name: 'self', color: 'var(--p1)', values: s.selfLoop}, {name: 'cluster', color: 'var(--ink2)', values: s.cluster, dash: '4 3', width: 1.5}], yMin: 0, yMax: 1, yFmt: v => Math.round(v * 100) + '%', h: 120});
+  const strip = drawStrip(host, r, perm !== 'RGB', i => sync(i));
+}
+
+// Consensus strip: one column per sample, one row per condition grouped by empty neighbours.
+function drawStrip(host, r, canon, onHover) {
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `<div class="charthead"><h3>Consensus genome over time</h3><span class="readout"></span></div><div class="legend"></div><div style="position:relative"><canvas></canvas></div><p class="note" style="margin-top:6px">Rows are the ${D.conditions.length} conditions, grouped by number of empty neighbours (0 at the top); columns are samples. Colour = the population's majority output for that condition; blank = most cells have no rule. Hover to read a rule.</p>`;
+  host.appendChild(wrap);
+  const lg = wrap.querySelector('.legend'), ro = wrap.querySelector('.readout');
+  legend(lg, [['R', 'var(--cR)'], ['G', 'var(--cG)'], ['B', 'var(--cB)'], ['no rule', 'var(--none)']]);
+  const strips = canon ? r.stripsCanon : r.strips;
+  const nc = D.conditions.length, ns = strips.length;
+  const order = [...Array(nc).keys()].sort((a, b) => D.nDead[a] - D.nDead[b] || a - b);
+  const cv = wrap.querySelector('canvas');
+  const W = width(wrap), m = 44, iw = W - m - 10, rowPx = 2, gap = 4;
+  const groupStart = []; let y = 0; const rowY = new Array(nc);
+  order.forEach((c, k) => { if (k === 0 || D.nDead[c] !== D.nDead[order[k - 1]]) { if (k) y += gap; groupStart.push([D.nDead[c], y]); } rowY[c] = y; y += rowPx; });
+  const H = y;
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = W * dpr; cv.height = H * dpr; cv.style.height = H + 'px';
+  const ctx = cv.getContext('2d'); ctx.scale(dpr, dpr);
+  const col = {R: css('--cR'), G: css('--cG'), B: css('--cB'), '.': css('--none')};
+  const cw = iw / ns;
+  for (let j = 0; j < ns; j++) for (let c = 0; c < nc; c++) { ctx.fillStyle = col[strips[j][c]] || col['.']; ctx.fillRect(m + j * cw, rowY[c], Math.ceil(cw), rowPx); }
+  ctx.fillStyle = css('--ink2'); ctx.font = '10px system-ui'; ctx.textAlign = 'right';
+  for (const [d, y0] of groupStart) ctx.fillText(d + ' empty', m - 4, y0 + 9);
+  if (r.fillTick != null) { const j = r.series.tick.indexOf(r.fillTick); ctx.fillStyle = css('--ink'); ctx.fillRect(m + j * cw - 1, 0, 2, H); }
+  const overlay = document.createElement('div'); overlay.style.cssText = `position:absolute;top:0;width:1px;height:${H}px;background:var(--ink);display:none;pointer-events:none`;
+  cv.parentNode.appendChild(overlay);
+  cv.addEventListener('mousemove', ev => {
+    const rc = cv.getBoundingClientRect(), j = Math.floor((ev.clientX - rc.left - m) / cw), yy = ev.clientY - rc.top;
+    if (j < 0 || j >= ns) return;
+    const c = order.find(c => yy >= rowY[c] && yy < rowY[c] + rowPx);
+    onHover(j);
+    if (c != null) {
+      const [sc, ...cnt] = D.conditions[c], L = canon ? 'RGB' : 'RGB';
+      const nb = cnt.map((v, k) => v ? v + L[k] : '').filter(Boolean); const e = 6 - cnt.reduce((a, b) => a + b, 0); if (e) nb.push(e + ' empty');
+      showTip(`tick ${fmtT(r.series.tick[j])}<br><span class="k">${L[sc]} with ${nb.join(' ') || 'nothing'} → ${strips[j][c] === '.' ? 'no rule (dies)' : strips[j][c]}</span>`, ev);
+    }
+  });
+  cv.addEventListener('mouseleave', () => { onHover(null); hideTip(); });
+  return {show(i) { if (i == null) { overlay.style.display = 'none'; ro.textContent = ''; return; } overlay.style.display = 'block'; overlay.style.left = (m + (i + 0.5) * cw) + 'px'; ro.textContent = 'tick ' + fmtT(r.series.tick[i]) + ' · ' + strips[i].replace(/\./g, '').length + ' rules'; }};
+}
+
+let start = 'overview';
+try { const t = localStorage.getItem('phaseExplorerTab'); if (TABS.some(([k]) => k === t)) start = t; } catch (e) {}
+openTab(start);
+addEventListener('resize', () => { for (const k in rendered) rendered[k] = false; const cur = TABS.find(([t]) => !$('#tab-' + t).hidden)[0]; rendered[cur] = true; RENDER[cur](); });
+</script>
+</body>
+</html>
