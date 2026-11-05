@@ -228,6 +228,24 @@ These 10 commits were made after the Claude Code session above ended, and I have
 
 Three of the commits are follow-up fixes for the JSON Lines newline delimiter, two of them empty. The branch is still on origin and has not been merged into `main`.
 
+### Nov 5: 60 more runs, deeper data collection, Phase Explorer (Claude Code)
+Prompt: "run more simulation. Improve the graphs and data collection visualizers so more indepth analysis can be done. Then write a report based on the simulations."
+
+**Data collection.**
+- `hexca.js` now counts rule deaths per condition and carries a resettable clade ID. Neither draws random numbers, so seeds reproduce the same runs.
+- `run.js` records rules, encounters and rule deaths split by empty neighbours, genome-size quantiles, the effective number of genomes and clade sweeps per 5k window. It can stop 15k ticks after the grid fills (`--settleFull`).
+- `batch.js` runs a plan of seeds and parameter sets in parallel.
+
+**Analysis and visualizers.** `deep.js` sorts phases into classes, times events relative to the fill, compares phase genomes across runs and aligns metrics on the fill. `explorer.js` builds the Phase Explorer page from it.
+
+**Runs.** 24 default seeds (201–224), plus 6 seeds (301–306) each at mutation rate 0.005 and 0.02, random death 0.0005 and 0.002, and k 0.05 and 0.2.
+
+**Findings:**
+- **All 24 default runs** filled and ended with two colours (median fill 57k ticks). 17 went three-colour churn → two-colour churn → two-colour full.
+- **Phases have characteristic genomes.** The same phase in different runs matches 48–61% after relabelling. Different phases match 0–28%, and a run's full-grid genome matches its own two-colour-churn genome only 7%.
+- **The final genome shift follows the fill.** Rule deaths collapse at +1k ticks and genome size is halfway down at +2k: once every cell is surrounded, unused rules are pruned at each birth. Before the fill, rules for surrounded cells rise to about a third of the consensus, and a clade sweep is 3.5× as likely in the window containing the fill.
+- **Mutation rate controls whether the grid fills.** At 0.02 no run filled in 200k ticks; at 0.005 runs filled at a median of 14k.
+
 ---
 
 ## 4. Findings that steered the next step
