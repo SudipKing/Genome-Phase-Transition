@@ -62,6 +62,43 @@ node analysis/endpoint-figure.js analysis/runs/endpoints.json analysis/runs/clus
 
 Writes one self-contained HTML page from the two analyses: each run's final colours beside its genetic clusters, every pair's similarity raw vs relabeled (split by whether the runs kept the same surviving colours), the run-by-run distance heatmap, the core rulebook and each cluster's defining rules.
 
+### Coarse genome clusters with a threshold slider
+
+```
+node analysis/genome-clusters.js analysis/runs/c1 analysis/runs/c2 ... > analysis/runs/genome-clusters.json
+node analysis/test-genome-clusters.js
+```
+
+Open `genome-cluster-explorer.html` (repo root) and load the JSON.
+
+`genome-clusters.js` clusters **every** surviving organism (no sampling) by **rule presence only**. Each genome
+becomes 252 bits (rule present or absent; output colour ignored). Two genomes differ by the number of
+conditions where one has a rule and the other doesn't. Organisms are first grouped into unique presence
+patterns with counts. The minimum spanning tree over those patterns is built once, so the clusters at any
+threshold *t* come from removing the tree's edges longer than *t*: connected components, i.e. single
+linkage, where links chain. A 6,000-organism endpoint takes about 5 to 20 s, mostly for the representative summaries at each of the `--thresholds` (fewer thresholds is faster).
+
+Options: `--tick T[,T…]` analyzes other checkpoints (default: the final snapshot); `--every N` analyzes every
+N ticks plus the final snapshot; `--ticks all` analyzes every snapshot; `--thresholds 0,1,2,…` sets the
+thresholds summarized in the JSON and report; `--slim` writes a report-only file without per-genome data.
+
+The stderr report gives, per checkpoint: survivors, unique genomes, unique presence patterns, the distribution
+of distances to each organism's nearest other pattern, the merge curve (clusters, largest share and
+clusters ≥ 1% at each *t*), and the top clusters at each threshold under two methods:
+
+- **Connected (chains):** genomes within *t* are linked, and links chain. This shows how clusters merge as *t*
+  rises. "Max dist. to rep." larger than *t* means members were joined through chains.
+- **Representative (no chaining):** patterns, most common first, join the first representative within *t*.
+  Every member is then within *t* of its representative.
+
+The explorer adds a slider for *t*, the population distribution, a cluster table, and a genome view per
+cluster. The genome view shows each of the 252 conditions as a cell, with opacity = share of the cluster
+carrying the rule, colour = most common output, and an underline on rules in the representative genome. It
+also lists the rules most of the cluster carries.
+
+This differs from `clusters.js`, which samples 300 organisms per run, counts output colours, relabels colours
+across runs, and chooses k by silhouette.
+
 ## Lineage + genomes
 
 The simulator keeps every organism in `OrganismLog` (`organismlog.js`): parent, founder, birth and death tick, and its genome stored as the rules that differ from its parent. A genome is rebuilt by replaying those changes from the founder down.

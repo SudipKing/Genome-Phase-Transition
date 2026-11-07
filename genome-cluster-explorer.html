@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Genome Cluster Explorer</title>
+<style>
+:root {
+  --bg: #f7f7f5; --panel: #ffffff; --ink: #1d1f23; --muted: #6a6f78; --line: #e2e3e6;
+  --accent: #3b5bdb; --accent-soft: #e7ecff;
+  --R: #d6453d; --G: #2f9e44; --B: #2f6fdb; --Y: #e0a800; --C: #1098ad; --M: #ae3ec9;
+  --empty: #eceef1; --bar2: #c9cdd4;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #15171b; --panel: #1d2026; --ink: #e8eaee; --muted: #9aa1ad; --line: #2d313a;
+    --accent: #7c95ff; --accent-soft: #252d4a; --empty: #262a32; --bar2: #444a55;
+    --R: #f0625a; --G: #4cc265; --B: #5b93f5;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #15171b; --panel: #1d2026; --ink: #e8eaee; --muted: #9aa1ad; --line: #2d313a;
+  --accent: #7c95ff; --accent-soft: #252d4a; --empty: #262a32; --bar2: #444a55;
+  --R: #f0625a; --G: #4cc265; --B: #5b93f5;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { padding: 18px 24px 8px; display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: baseline; }
+h1 { font-size: 20px; margin: 0; font-weight: 650; }
+h2 { font-size: 14px; margin: 0 0 10px; font-weight: 650; }
+.sub { color: var(--muted); }
+main { padding: 8px 24px 40px; display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); max-width: 1400px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+.row { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; }
+label { color: var(--muted); font-size: 12px; display: flex; flex-direction: column; gap: 3px; }
+select, input[type=number], button { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
+button { cursor: pointer; }
+button.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.seg { display: inline-flex; }
+.seg button { border-radius: 0; }
+.seg button:first-child { border-radius: 6px 0 0 6px; }
+.seg button:last-child { border-radius: 0 6px 6px 0; border-left: none; }
+.slider { display: flex; align-items: center; gap: 12px; flex: 1 1 340px; }
+.slider input[type=range] { flex: 1; accent-color: var(--accent); }
+.tnum { font-size: 26px; font-weight: 700; min-width: 2.2em; text-align: right; font-variant-numeric: tabular-nums; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
+.tile { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.tile .v { font-size: 22px; font-weight: 680; font-variant-numeric: tabular-nums; }
+.tile .k { color: var(--muted); font-size: 12px; }
+.two { display: grid; gap: 16px; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); }
+@media (max-width: 900px) { .two { grid-template-columns: minmax(0, 1fr); } header, main { padding-left: 16px; padding-right: 16px; } }
+svg text { fill: var(--muted); font-size: 11px; }
+.dist { display: flex; height: 28px; border-radius: 6px; overflow: hidden; border: 1px solid var(--line); }
+.dist div { height: 100%; border-right: 1px solid var(--panel); cursor: pointer; }
+.tablewrap { max-height: 420px; overflow: auto; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { padding: 5px 8px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { position: sticky; top: 0; background: var(--panel); color: var(--muted); font-weight: 600; font-size: 12px; }
+th:first-child, td:first-child { text-align: left; }
+tr.sel td { background: var(--accent-soft); }
+tbody tr { cursor: pointer; }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+.genome { display: grid; grid-template-columns: 24px repeat(84, minmax(0, 1fr)); gap: 1px; }
+.genome .lab { font-size: 11px; color: var(--muted); display: flex; align-items: center; }
+.cell { aspect-ratio: 1 / 2.2; border-radius: 1px; background: var(--empty); position: relative; }
+.cell.rep::after { content: ""; position: absolute; left: 0; right: 0; bottom: -3px; height: 2px; background: var(--ink); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; color: var(--muted); font-size: 12px; margin-top: 10px; }
+.mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 11px; word-break: break-all; color: var(--muted); }
+#tip { position: fixed; pointer-events: none; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font-size: 12px; box-shadow: 0 4px 14px rgba(0,0,0,.15); display: none; z-index: 10; max-width: 280px; }
+.drop { border: 2px dashed var(--line); border-radius: 10px; padding: 36px; text-align: center; color: var(--muted); }
+.note { color: var(--muted); font-size: 12px; }
+.warn { color: var(--Y); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Genome Cluster Explorer</h1>
+  <span class="sub">Coarse genome clusters: rule present or absent, output colours ignored. Slide the threshold to see clusters merge.</span>
+</header>
+<main>
+  <section class="panel" id="loader">
+    <div class="drop" id="drop">
+      <p><strong>Open a <code>genome-clusters.json</code></strong> made by <code>node analysis/genome-clusters.js &lt;run dir&gt; ... &gt; genome-clusters.json</code></p>
+      <input type="file" id="file" accept=".json,application/json">
+      <p class="note">Or drop the file here. Nothing leaves your machine.</p>
+    </div>
+  </section>
+
+  <div id="app" hidden>
+    <section class="panel">
+      <div class="row">
+        <label>Run <select id="run"></select></label>
+        <label>Checkpoint <select id="cp"></select></label>
+        <label>Method
+          <span class="seg">
+            <button id="mCC" class="on" title="Genomes within t are linked and links chain: A–B and B–C put A, B, C together">Connected (chains)</button>
+            <button id="mRep" title="Every member within t of its cluster's representative (the most common genome); no chaining">Representative</button>
+          </span>
+        </label>
+        <div class="slider">
+          <span class="tnum" id="tval">0</span>
+          <div style="flex:1; display:flex; flex-direction:column; gap:2px">
+            <input type="range" id="t" min="0" max="40" value="4" step="1">
+            <span class="note">Threshold <em>t</em>: genomes that differ in at most <em>t</em> rules can share a cluster. 0 = identical rule sets only.</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="tiles" id="tiles"></div>
+      <p class="note" id="phaseNote" style="margin:10px 0 0"></p>
+    </section>
+
+    <div class="two">
+      <section class="panel">
+        <h2>Clusters as the threshold rises</h2>
+        <div id="curve"></div>
+        <div class="legend">
+          <span><span class="sw" style="background:var(--accent)"></span>number of clusters (log scale, left)</span>
+          <span><span class="sw" style="background:var(--R)"></span>largest cluster's share of the population (right)</span>
+        </div>
+        <p class="note" id="curveNote"></p>
+      </section>
+      <section class="panel">
+        <h2>Organisms by distance to their nearest other genome</h2>
+        <div id="nn"></div>
+        <p class="note">Mutants of a common parent sit 1–4 rules apart (a child differs from its parent in about 4 rules). Many organisms at 1–4 means the population is mostly mutant families.</p>
+      </section>
+    </div>
+
+    <section class="panel">
+      <h2>Population distribution at <em>t</em> = <span class="tcopy">0</span></h2>
+      <div class="dist" id="dist"></div>
+      <p class="note" id="distNote"></p>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>Cluster</th><th>Organisms</th><th>% of pop.</th><th>Rule patterns</th><th>Exact genomes</th><th>Rules in rep.</th><th>Mean dist. to rep.</th><th>Max dist. to rep.</th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <p class="note">Representative (rep.) = the cluster's most common rule pattern. "Max dist. to rep." above <em>t</em> means the cluster was joined by chaining.</p>
+    </section>
+
+    <section class="panel">
+      <h2 id="gTitle">Cluster genome</h2>
+      <p class="note" id="gSub"></p>
+      <div class="genome" id="genome"></div>
+      <div class="legend">
+        <span>Each cell is one of the 252 conditions: a row per current-cell colour, 84 neighbourhoods across.</span>
+        <span>Opacity = share of the cluster's organisms carrying the rule</span>
+        <span>Colour = the most common output among them</span>
+        <span>Underline = in the representative genome</span>
+      </div>
+      <h2 style="margin-top:16px">Rules carried by at least half of the cluster</h2>
+      <div class="tablewrap" style="max-height:300px">
+        <table><thead><tr><th>Condition</th><th>Carried by</th><th>Outputs (R / G / B)</th></tr></thead><tbody id="rules"></tbody></table>
+      </div>
+      <p style="margin:12px 0 4px" class="note">Representative genome (<code>.</code> = no rule, letter = output colour):</p>
+      <div class="mono" id="repStr"></div>
+    </section>
+  </div>
+</main>
+<div id="tip"></div>
+
+<script>
+'use strict';
+const SYM = 'RGBYCM';
+const $ = id => document.getElementById(id);
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const fmt = n => n.toLocaleString();
+const pct = x => (x * 100).toFixed(x < 0.01 && x > 0 ? 2 : 1) + '%';
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+
+let DATA = null, run = null, cp = null, model = null, method = 'cc', selected = 0, clusters = [];
+const cache = new Map();
+
+// ---------- measurement (same as analysis/genome-clusters.js)
+function presenceBits(g) {
+  const b = new Uint32Array(8);
+  for (let c = 0; c < g.length; c++) if (g[c] !== '.') b[c >>> 5] |= 1 << (c & 31);
+  return b;
+}
+function popcount(x) { x -= (x >>> 1) & 0x55555555; x = (x & 0x33333333) + ((x >>> 2) & 0x33333333); return (((x + (x >>> 4)) & 0x0F0F0F0F) * 0x01010101) >>> 24; }
+function dist(a, b) { let d = 0; for (let w = 0; w < 8; w++) d += popcount(a[w] ^ b[w]); return d; }
+
+function buildModel(c) {
+  const pats = c.patterns.map(exact => {
+    let count = 0; for (const [, n] of exact) count += n;
+    return {exact, count, bits: presenceBits(exact[0][0]), rules: exact[0][0].replace(/\./g, '').length};
+  });
+  return {pats, total: pats.reduce((s, p) => s + p.count, 0), mst: c.mst};
+}
+function labelsCC(m, t) {
+  const parent = Int32Array.from(m.pats, (_, i) => i);
+  const find = x => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+  for (const [i, j, w] of m.mst) { if (w > t) break; const a = find(i), b = find(j); if (a !== b) parent[b] = a; }
+  return m.pats.map((_, i) => find(i));
+}
+function labelsRep(m, t) {   // patterns are stored most-organisms-first
+  const reps = [], lab = new Array(m.pats.length);
+  for (let i = 0; i < m.pats.length; i++) {
+    let home = -1;
+    for (const r of reps) if (dist(m.pats[r].bits, m.pats[i].bits) <= t) { home = r; break; }
+    if (home < 0) { reps.push(i); home = i; }
+    lab[i] = home;
+  }
+  return lab;
+}
+function clustersAt(t) {
+  const key = method + ':' + t;
+  if (cache.has(key)) return cache.get(key);
+  const lab = method === 'cc' ? labelsCC(model, t) : labelsRep(model, t);
+  const groups = new Map();
+  lab.forEach((l, i) => { if (!groups.has(l)) groups.set(l, []); groups.get(l).push(i); });
+  const out = [...groups.values()].map(mem => {
+    mem.sort((a, b) => model.pats[b].count - model.pats[a].count || a - b);
+    const rep = model.pats[mem[0]];
+    let organisms = 0, exact = 0, spread = 0, far = 0;
+    for (const i of mem) {
+      const p = model.pats[i], d = dist(rep.bits, p.bits);
+      organisms += p.count; exact += p.exact.length; spread += d * p.count; if (d > far) far = d;
+    }
+    return {mem, rep: mem[0], organisms, share: organisms / model.total, exact, spread: spread / organisms, far};
+  }).sort((a, b) => b.organisms - a.organisms);
+  cache.set(key, out);
+  return out;
+}
+
+// ---------- loading
+function load(json) {
+  if (json.format !== 'genome-clusters/1' || !json.runs) throw new Error('Not a genome-clusters.json file');
+  if (!json.runs[0].checkpoints[0].patterns) throw new Error('This file was made with --slim; rerun without --slim for the explorer');
+  DATA = json;
+  $('run').innerHTML = DATA.runs.map((r, i) => `<option value="${i}">${esc(r.name)} (seed ${esc(r.seed)})</option>`).join('');
+  $('loader').hidden = true; $('app').hidden = false;
+  pickRun(0);
+}
+function pickRun(i) {
+  run = DATA.runs[i];
+  $('cp').innerHTML = run.checkpoints.map((c, k) => `<option value="${k}">tick ${fmt(c.tick)}${c.final ? ' (final)' : ''}${c.phase ? ' · ' + esc(c.phase) : ''}</option>`).join('');
+  $('cp').value = run.checkpoints.length - 1;
+  pickCp(run.checkpoints.length - 1);
+}
+function pickCp(k) {
+  cp = run.checkpoints[k];
+  model = buildModel(cp); cache.clear(); selected = 0;
+  const maxT = cp.mergeCurve.length ? cp.mergeCurve[cp.mergeCurve.length - 1].t : 0;
+  $('t').max = Math.max(1, Math.min(maxT, 60));
+  drawNN(); render();
+}
+
+// ---------- rendering
+function render() {
+  const t = +$('t').value;
+  $('tval').textContent = t;
+  document.querySelectorAll('.tcopy').forEach(e => e.textContent = t);
+  clusters = clustersAt(t);
+  if (selected >= clusters.length) selected = 0;
+  const big = clusters.filter(c => c.share >= 0.01).length;
+  const tiles = [
+    ['Survivors', fmt(cp.survivors)], ['Unique genomes', fmt(cp.uniqueGenomes)],
+    ['Unique rule patterns', fmt(cp.uniquePatterns)], ['Clusters', fmt(clusters.length)],
+    ['Clusters ≥ 1% of pop.', fmt(big)], ['Largest cluster', pct(clusters[0].share)],
+  ];
+  $('tiles').innerHTML = tiles.map(([k, v]) => `<div class="tile"><div class="v">${v}</div><div class="k">${k}</div></div>`).join('');
+  $('phaseNote').textContent = `Run ${run.name}, tick ${fmt(cp.tick)}${cp.phase ? ', surviving colours ' + cp.phase : ''}. ` +
+    `${fmt(cp.survivors)} organisms carry ${fmt(cp.uniqueGenomes)} distinct exact genomes, so most organisms' genomes are unique to them.`;
+  drawCurve(t); drawDist(); drawTable(); drawGenome();
+}
+
+function drawCurve(t) {
+  const W = 560, H = 220, L = 44, R = 44, T = 10, B = 28;
+  const curve = method === 'cc' ? cp.mergeCurve : null;
+  const maxT = +$('t').max;
+  const pts = curve ? curve.filter(r => r.t <= maxT) : null;
+  const x = v => L + (v / maxT) * (W - L - R);
+  const maxC = Math.max(2, cp.uniquePatterns);
+  const yC = v => T + (1 - Math.log10(Math.max(1, v)) / Math.log10(maxC)) * (H - T - B);
+  const yS = v => T + (1 - v) * (H - T - B);
+  let s = `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Clusters versus threshold">`;
+  for (let p = 0; p <= Math.log10(maxC); p++) s += `<line x1="${L}" x2="${W - R}" y1="${yC(10 ** p)}" y2="${yC(10 ** p)}" stroke="${css('--line')}"/><text x="${L - 6}" y="${yC(10 ** p) + 4}" text-anchor="end">${fmt(10 ** p)}</text>`;
+  for (const v of [0, .5, 1]) s += `<text x="${W - R + 6}" y="${yS(v) + 4}">${v * 100}%</text>`;
+  for (let v = 0; v <= maxT; v += maxT > 30 ? 10 : 5) s += `<text x="${x(v)}" y="${H - 8}" text-anchor="middle">${v}</text>`;
+  if (pts) {
+    s += `<polyline fill="none" stroke="${css('--accent')}" stroke-width="2" points="${pts.map(r => x(r.t) + ',' + yC(r.clusters)).join(' ')}"/>`;
+    s += `<polyline fill="none" stroke="${css('--R')}" stroke-width="2" points="${pts.map(r => x(r.t) + ',' + yS(r.largestShare)).join(' ')}"/>`;
+  } else {
+    // representative mode: compute the curve lazily at the integer thresholds visited so far + current
+    const ts = [...Array(maxT + 1).keys()].filter(v => cache.has('rep:' + v));
+    const pc = ts.map(v => [v, cache.get('rep:' + v)]);
+    s += `<polyline fill="none" stroke="${css('--accent')}" stroke-width="2" points="${pc.map(([v, c]) => x(v) + ',' + yC(c.length)).join(' ')}"/>`;
+    s += `<polyline fill="none" stroke="${css('--R')}" stroke-width="2" points="${pc.map(([v, c]) => x(v) + ',' + yS(c[0].share)).join(' ')}"/>`;
+    for (const [v, c] of pc) s += `<circle cx="${x(v)}" cy="${yC(c.length)}" r="2.5" fill="${css('--accent')}"/>`;
+  }
+  s += `<line x1="${x(t)}" x2="${x(t)}" y1="${T}" y2="${H - B}" stroke="${css('--ink')}" stroke-dasharray="3 3"/>`;
+  s += `<text x="${(L + W - R) / 2}" y="${H}" text-anchor="middle">threshold t (rules)</text></svg>`;
+  $('curve').innerHTML = s;
+  $('curveNote').textContent = method === 'cc'
+    ? 'A plateau, where the cluster count holds steady over a range of t, would mean separate genetic groups. A smooth slide into one giant cluster means mutants chain together.'
+    : 'Representative mode computes each threshold on demand. Move the slider and the curve fills in as you go.';
+}
+
+function drawNN() {
+  const h = cp.nearestNeighbour, keys = Object.keys(h).map(Number).sort((a, b) => a - b);
+  const W = 520, H = 200, L = 40, B = 26, T = 8, maxK = Math.min(keys[keys.length - 1] || 1, 30);
+  const vals = keys.filter(k => k <= maxK).map(k => [k, h[k] / cp.survivors]);
+  const maxV = Math.max(...vals.map(v => v[1]), 0.01);
+  const bw = (W - L - 10) / (maxK + 1);
+  let s = `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Nearest-neighbour distances">`;
+  for (const [k, v] of vals) {
+    const y = T + (1 - v / maxV) * (H - T - B);
+    s += `<rect x="${L + k * bw + 1}" y="${y}" width="${bw - 2}" height="${H - B - y}" fill="${k <= 4 ? css('--accent') : css('--bar2')}" rx="2"><title>${k} rules: ${pct(v)} of organisms</title></rect>`;
+  }
+  for (let k = 0; k <= maxK; k += maxK > 15 ? 5 : 1) s += `<text x="${L + k * bw + bw / 2}" y="${H - 8}" text-anchor="middle">${k}</text>`;
+  s += `<text x="${L - 6}" y="${T + 10}" text-anchor="end">${pct(maxV)}</text><text x="${L - 6}" y="${H - B}" text-anchor="end">0</text></svg>`;
+  const within4 = keys.filter(k => k <= 4).reduce((a, k) => a + h[k], 0) / cp.survivors;
+  $('nn').innerHTML = s + `<p class="note" style="margin:4px 0 0"><strong>${pct(within4)}</strong> of organisms have another genome within 4 rules.</p>`;
+}
+
+function clColour(i) { return i < 12 ? `hsl(${(i * 47 + 220) % 360} 55% 55%)` : css('--bar2'); }
+function drawDist() {
+  const shown = clusters.slice(0, 12), rest = clusters.slice(12);
+  const restShare = rest.reduce((s, c) => s + c.share, 0);
+  $('dist').innerHTML = shown.map((c, i) => `<div style="width:${c.share * 100}%;background:${clColour(i)}" title="Cluster ${i + 1}: ${fmt(c.organisms)} organisms (${pct(c.share)})" data-i="${i}"></div>`).join('') +
+    (rest.length ? `<div style="width:${restShare * 100}%;background:${css('--bar2')}" title="${fmt(rest.length)} smaller clusters: ${pct(restShare)}"></div>` : '');
+  $('dist').querySelectorAll('[data-i]').forEach(d => d.onclick = () => { selected = +d.dataset.i; drawTable(); drawGenome(); });
+  const singletons = clusters.filter(c => c.organisms === 1).length;
+  $('distNote').textContent = `${fmt(clusters.length)} clusters: the 12 largest are coloured, and the rest (${fmt(rest.length)}, ${pct(restShare)} of the population) are grey. ${fmt(singletons)} clusters hold a single organism.`;
+}
+function drawTable() {
+  const t = +$('t').value;
+  $('rows').innerHTML = clusters.slice(0, 200).map((c, i) => `<tr data-i="${i}" class="${i === selected ? 'sel' : ''}">
+    <td><span class="sw" style="background:${clColour(i)}"></span>${i + 1}</td><td>${fmt(c.organisms)}</td><td>${pct(c.share)}</td>
+    <td>${fmt(c.mem.length)}</td><td>${fmt(c.exact)}</td><td>${model.pats[c.rep].rules}</td><td>${c.spread.toFixed(1)}</td>
+    <td${c.far > t ? ' class="warn" title="Larger than t: members joined through chains"' : ''}>${c.far}</td></tr>`).join('') +
+    (clusters.length > 200 ? `<tr><td colspan="8" class="note">… ${fmt(clusters.length - 200)} more</td></tr>` : '');
+  $('rows').querySelectorAll('tr[data-i]').forEach(r => r.onclick = () => { selected = +r.dataset.i; drawTable(); drawGenome(); });
+}
+
+function ruleText(c) {
+  const [s, ...cnt] = run.conditions[c];
+  const nb = cnt.map((v, k) => v ? v + SYM[k] : '').filter(Boolean);
+  const empty = 6 - cnt.reduce((x, y) => x + y, 0);
+  if (empty) nb.push(empty + ' empty');
+  return `${SYM[s]} with ${nb.join(' ')}`;
+}
+function drawGenome() {
+  const c = clusters[selected], n = run.colours, nc = run.conditions.length;
+  const carried = new Float64Array(nc), outs = Array.from({length: nc}, () => new Float64Array(n));
+  for (const i of c.mem) for (const [g, k] of model.pats[i].exact)
+    for (let x = 0; x < nc; x++) if (g[x] !== '.') { carried[x] += k; outs[x][SYM.indexOf(g[x])] += k; }
+  const repG = model.pats[c.rep].exact[0][0];
+  $('gTitle').textContent = `Cluster ${selected + 1} genome`;
+  $('gSub').textContent = `${fmt(c.organisms)} organisms (${pct(c.share)}), ${fmt(c.mem.length)} rule patterns, ${fmt(c.exact)} exact genomes. ` +
+    `Its most common genome has ${model.pats[c.rep].rules} rules; members average ${c.spread.toFixed(1)} rules away from it (furthest ${c.far}).`;
+  // rows by current-cell colour, in condition order
+  const bySelf = Array.from({length: n}, () => []);
+  run.conditions.forEach((cond, x) => bySelf[cond[0]].push(x));
+  let html = '';
+  bySelf.forEach((xs, s) => {
+    html += `<div class="lab">${SYM[s]}</div>`;
+    for (const x of xs) {
+      const f = carried[x] / c.organisms;
+      const o = outs[x].indexOf(Math.max(...outs[x]));
+      const bg = f >= 0.02 ? `background:color-mix(in srgb, ${css('--' + SYM[o])} ${Math.round(100 * f)}%, var(--empty))` : '';
+      html += `<div class="cell${repG[x] !== '.' ? ' rep' : ''}" style="${bg}" data-x="${x}"></div>`;
+    }
+    for (let k = xs.length; k < 84; k++) html += '<div></div>';
+  });
+  $('genome').style.gridTemplateColumns = `24px repeat(${Math.max(...bySelf.map(a => a.length))}, minmax(0, 1fr))`;
+  $('genome').innerHTML = html;
+  $('genome').querySelectorAll('.cell').forEach(el => {
+    el.onmousemove = e => {
+      const x = +el.dataset.x, f = carried[x] / c.organisms;
+      const o = [...outs[x]].map((v, k) => v ? `${SYM[k]} ${pct(v / (carried[x] || 1))}` : '').filter(Boolean).join(' · ');
+      tip(e, `<strong>${esc(ruleText(x))}</strong><br>carried by ${pct(f)} of the cluster${o ? '<br>outputs: ' + o : ''}<br>representative: ${repG[x] === '.' ? 'no rule (dies)' : '→ ' + repG[x]}`);
+    };
+    el.onmouseleave = () => $('tip').style.display = 'none';
+  });
+  const rows = [];
+  for (let x = 0; x < nc; x++) if (carried[x] / c.organisms >= 0.5) rows.push(x);
+  rows.sort((a, b) => carried[b] - carried[a]);
+  $('rules').innerHTML = rows.map(x => `<tr><td>${esc(ruleText(x))}</td><td>${pct(carried[x] / c.organisms)}</td>
+    <td>${[...outs[x]].map(v => pct(v / carried[x])).join(' / ')}</td></tr>`).join('') ||
+    '<tr><td colspan="3" class="note">No rule is carried by half the cluster.</td></tr>';
+  $('repStr').textContent = repG;
+}
+function tip(e, html) {
+  const t = $('tip'); t.innerHTML = html; t.style.display = 'block';
+  t.style.left = Math.min(e.clientX + 14, innerWidth - 290) + 'px'; t.style.top = (e.clientY + 14) + 'px';
+}
+
+// ---------- wiring
+$('t').oninput = () => render();
+$('run').onchange = e => pickRun(+e.target.value);
+$('cp').onchange = e => pickCp(+e.target.value);
+$('mCC').onclick = () => { method = 'cc'; $('mCC').classList.add('on'); $('mRep').classList.remove('on'); render(); };
+$('mRep').onclick = () => { method = 'rep'; $('mRep').classList.add('on'); $('mCC').classList.remove('on'); render(); };
+function readFile(f) { f.text().then(s => { try { load(JSON.parse(s)); } catch (err) { alert(err.message); } }); }
+$('file').onchange = e => e.target.files[0] && readFile(e.target.files[0]);
+const drop = $('drop');
+drop.ondragover = e => { e.preventDefault(); drop.style.borderColor = css('--accent'); };
+drop.ondragleave = () => drop.style.borderColor = '';
+drop.ondrop = e => { e.preventDefault(); drop.style.borderColor = ''; e.dataTransfer.files[0] && readFile(e.dataTransfer.files[0]); };
+// ?data=path loads a file served next to this page (e.g. from a local static server).
+const q = new URLSearchParams(location.search).get('data');
+if (q) fetch(q).then(r => r.json()).then(load).catch(err => alert('Could not load ' + q + ': ' + err.message));
+</script>
+</body>
+</html>
