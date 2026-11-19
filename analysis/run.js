@@ -85,8 +85,21 @@ const stableSamples = Number(args.stableSamples || 5);
 let quietStreak = 0;
 let stopReason = 'max-ticks';
 const storedRun = runStorage.createRun(out, {gzip: !args.plainSnapshots});
+// --gridEvery T saves the grid's cell colours every T ticks (rounded up to a sample) to grids.json.
+// Each frame is one string, one character per cell ('.' empty, else R/G/B...), in the
+// simulation's own order: index = col * rows + row, odd columns shifted down half a hex.
+const gridEvery = args.gridEvery ? Math.max(period, parseInt(args.gridEvery)) : 0;
+const gridFrames = [];
+function gridFrame() {
+    let s = '';
+    for (let i = 0; i < N; i++) s += SYM[hexca.color[i] + 1];
+    return {tick: hexca.tick, cells: s};
+}
 function saveSamples() {
     fs.writeFileSync(path.join(out, 'samples.json'), JSON.stringify({seed, ticks: hexca.tick, params: P, conditions: hexca.conditions, samples, dominantGenomes}));
+    if (gridEvery) fs.writeFileSync(path.join(out, 'grids.json'), JSON.stringify({
+        seed, cols: hexca.cols, rows: hexca.rows, order: 'col-major, odd columns offset half a hex down',
+        symbols: SYM, frames: gridFrames}));
 }
 const dominantGenomes = {};   // genome string -> first tick seen as dominant
 const t0 = Date.now();
@@ -149,6 +162,7 @@ for (let t = 1; t <= ticks; t++) {
         for (let c = 0; c < ncond; c++) if (SYM[hexca.genomes[base + c] + 1] !== consensus[c]) hamSum++;
     }
     const enc = last(rs.encFreq);
+    if (gridEvery && hexca.tick % gridEvery === 0) gridFrames.push(gridFrame());
     samples.push({
         tick: hexca.tick,
         pop: alive / N,
@@ -200,6 +214,8 @@ for (let t = 1; t <= ticks; t++) {
     }
 }
 
+// Always keep the final grid, whatever tick the run stopped on.
+if (gridEvery && (!gridFrames.length || gridFrames[gridFrames.length - 1].tick !== hexca.tick)) gridFrames.push(gridFrame());
 saveSamples();
 runStorage.completeRun(storedRun, {
     format: 'hex-ca-run-v1', seed, ticks: hexca.tick, stopReason,
