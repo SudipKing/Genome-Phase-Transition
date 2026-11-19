@@ -80,8 +80,10 @@ tbody tr { cursor: pointer; }
 <main>
   <section class="panel" id="loader">
     <div class="drop" id="drop">
-      <p><strong>Open a <code>genome-clusters.json</code></strong> made by <code>node analysis/genome-clusters.js &lt;run dir&gt; ... &gt; genome-clusters.json</code></p>
-      <input type="file" id="file" accept=".json,application/json">
+      <p><strong>Open a <code>.hxlg</code></strong> from the simulator's <b>Export lineage + genomes</b> button (clusters the organisms alive at export),
+        or a <code>genome-clusters.json</code> made by <code>node analysis/genome-clusters.js &lt;run dir&gt; ... &gt; genome-clusters.json</code></p>
+      <input type="file" id="file" accept=".hxlg,.json,application/json,application/octet-stream">
+      <p class="note" id="status"></p>
       <p class="note">Or drop the file here. Nothing leaves your machine.</p>
     </div>
   </section>
@@ -163,6 +165,7 @@ tbody tr { cursor: pointer; }
 </main>
 <div id="tip"></div>
 
+<script src="./organismlog.js"></script>
 <script>
 'use strict';
 const SYM = 'RGBYCM';
@@ -227,12 +230,101 @@ function clustersAt(t) {
   return out;
 }
 
+// ---------- .hxlg (lineage + genomes) → the same shape genome-clusters.js writes, one checkpoint
+// The analysis below mirrors groupPatterns / spanningTree / mergeCurve / nearestHistogram in
+// analysis/genome-clusters.js; keep the two in step.
+function genomesFromHxlg(d) {
+  const h = d.header, out = new Map(), g = new Int8Array(h.ncond), sym = '.' + SYM.slice(0, h.n);
+  for (const id of h.liveAtExport) {
+    if (id < 0 || id >= h.organisms) continue;   // not recorded (log disabled when it was born)
+    d.genomeOf(id, g);
+    let s = ''; for (let c = 0; c < h.ncond; c++) s += sym[g[c] + 1];
+    out.set(s, (out.get(s) || 0) + 1);
+  }
+  return [...out];
+}
+function groupPatterns(genomes) {
+  const byKey = new Map();
+  for (const [g, count] of genomes) {
+    const key = g.replace(/[^.]/g, '1').replace(/\./g, '0');
+    let p = byKey.get(key);
+    if (!p) byKey.set(key, p = {key, bits: presenceBits(g), count: 0, exact: []});
+    p.count += count; p.exact.push([g, count]);
+  }
+  const pats = [...byKey.values()];
+  for (const p of pats) p.exact.sort((a, b) => b[1] - a[1]);
+  pats.sort((a, b) => b.count - a.count || (a.key < b.key ? -1 : 1));
+  return pats;
+}
+function spanningTree(pats) {   // Prim's, O(U²); edges [i, j, w] sorted by w
+  const U = pats.length, edges = [];
+  if (U < 2) return edges;
+  const inTree = new Uint8Array(U), best = new Int32Array(U).fill(1 << 30), from = new Int32Array(U).fill(-1);
+  const flat = new Uint32Array(U * 8);   // all patterns' bits in one array: far fewer object lookups in the O(U²) loop
+  pats.forEach((p, i) => flat.set(p.bits, i * 8));
+  let cur = 0; inTree[0] = 1;
+  for (let added = 1; added < U; added++) {
+    const c0 = cur * 8; let next = -1, nd = 1 << 30;
+    for (let j = 0; j < U; j++) {
+      if (inTree[j]) continue;
+      let dd = 0;
+      for (let w = 0, j0 = j * 8; w < 8; w++) dd += popcount(flat[c0 + w] ^ flat[j0 + w]);
+      if (dd < best[j]) { best[j] = dd; from[j] = cur; }
+      if (best[j] < nd) { nd = best[j]; next = j; }
+    }
+    inTree[next] = 1; edges.push([from[next], next, nd]); cur = next;
+  }
+  return edges.sort((a, b) => a[2] - b[2] || a[0] - b[0] || a[1] - b[1]);
+}
+function mergeCurve(pats, edges, total) {
+  const U = pats.length, parent = Int32Array.from(pats, (_, i) => i), size = pats.map(p => p.count);
+  const find = x => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+  const maxT = edges.length ? edges[edges.length - 1][2] : 0;
+  let clusters = U, largest = Math.max(0, ...size), e = 0;
+  const curve = [];
+  for (let t = 0; t <= maxT; t++) {
+    while (e < edges.length && edges[e][2] <= t) {
+      const a = find(edges[e][0]), b = find(edges[e][1]);
+      if (a !== b) { parent[b] = a; size[a] += size[b]; largest = Math.max(largest, size[a]); clusters--; }
+      e++;
+    }
+    let big = 0; for (let i = 0; i < U; i++) if (parent[i] === i && size[i] >= 0.01 * total) big++;
+    curve.push({t, clusters, largestShare: +(largest / total).toFixed(4), clustersOver1pct: big});
+  }
+  return curve;
+}
+function nearestHistogram(pats, edges) {
+  const nn = new Array(pats.length).fill(Infinity);
+  for (const [i, j, w] of edges) { nn[i] = Math.min(nn[i], w); nn[j] = Math.min(nn[j], w); }
+  const hist = {};
+  nn.forEach((d, i) => { if (d !== Infinity) hist[d] = (hist[d] || 0) + pats[i].count; });
+  return hist;
+}
+function phaseFromSeries(sr, present = 0.08) {   // same label as phaseLabel in genome-clusters.js
+  if (!sr || !sr.population || !sr.population.length) return '';
+  const k = sr.population.length - 1, pop = sr.population[k];
+  if (pop < 0.01) return 'extinct';
+  const order = sr.colors.map((c, i) => [c[k], i]).filter(x => x[0] > present).sort((a, b) => b[0] - a[0]).map(x => x[1]);
+  return order.map(i => SYM[i]).join('>') + (pop >= 0.95 ? ' full' : '');
+}
+function fromHxlg(buf, name) {
+  const d = OrganismLog.parse(buf), h = d.header;
+  if (h.useHistory) throw new Error('This run used history rules; the cluster explorer does not support those conditions.');
+  const genomes = genomesFromHxlg(d);
+  if (!genomes.length) throw new Error('No organisms were alive at export, so there is nothing to cluster.');
+  const pats = groupPatterns(genomes), total = pats.reduce((s, p) => s + p.count, 0), edges = spanningTree(pats);
+  const cp = {tick: h.exportedAtTick, final: true, phase: phaseFromSeries(h.series), survivors: total,
+    uniqueGenomes: genomes.length, uniquePatterns: pats.length, nearestNeighbour: nearestHistogram(pats, edges),
+    mergeCurve: mergeCurve(pats, edges, total), mst: edges, patterns: pats.map(p => p.exact)};
+  return {format: 'genome-clusters/1', runs: [{name, seed: h.params && h.params.seed, colours: h.n, conditions: h.conditions, checkpoints: [cp]}]};
+}
+
 // ---------- loading
 function load(json) {
   if (json.format !== 'genome-clusters/1' || !json.runs) throw new Error('Not a genome-clusters.json file');
   if (!json.runs[0].checkpoints[0].patterns) throw new Error('This file was made with --slim; rerun without --slim for the explorer');
   DATA = json;
-  $('run').innerHTML = DATA.runs.map((r, i) => `<option value="${i}">${esc(r.name)} (seed ${esc(r.seed)})</option>`).join('');
+  $('run').innerHTML = DATA.runs.map((r, i) => `<option value="${i}">${esc(r.name)}${r.seed != null ? ` (seed ${esc(r.seed)})` : ''}</option>`).join('');
   $('loader').hidden = true; $('app').hidden = false;
   pickRun(0);
 }
@@ -397,7 +489,19 @@ $('run').onchange = e => pickRun(+e.target.value);
 $('cp').onchange = e => pickCp(+e.target.value);
 $('mCC').onclick = () => { method = 'cc'; $('mCC').classList.add('on'); $('mRep').classList.remove('on'); render(); };
 $('mRep').onclick = () => { method = 'rep'; $('mRep').classList.add('on'); $('mCC').classList.remove('on'); render(); };
-function readFile(f) { f.text().then(s => { try { load(JSON.parse(s)); } catch (err) { alert(err.message); } }); }
+function isHxlg(buf) { const u = new Uint8Array(buf, 0, Math.min(4, buf.byteLength)); return u[0] === 72 && u[1] === 88 && u[2] === 76 && u[3] === 71; }
+async function loadBuffer(buf, name) {
+  if (isHxlg(buf)) {
+    $('status').textContent = 'Rebuilding genomes and clustering the living population…';
+    await new Promise(r => setTimeout(r, 30));   // let the message paint before the heavy work
+    const t0 = performance.now();
+    load(fromHxlg(buf, name.replace(/\.hxlg$/i, '')));
+    $('status').textContent = `Clustered in ${((performance.now() - t0) / 1000).toFixed(1)} s.`;
+  } else load(JSON.parse(new TextDecoder().decode(buf)));
+}
+function readFile(f) {
+  f.arrayBuffer().then(buf => loadBuffer(buf, f.name)).catch(err => { $('status').textContent = ''; alert(err.message); });
+}
 $('file').onchange = e => e.target.files[0] && readFile(e.target.files[0]);
 const drop = $('drop');
 drop.ondragover = e => { e.preventDefault(); drop.style.borderColor = css('--accent'); };
@@ -405,7 +509,7 @@ drop.ondragleave = () => drop.style.borderColor = '';
 drop.ondrop = e => { e.preventDefault(); drop.style.borderColor = ''; e.dataTransfer.files[0] && readFile(e.dataTransfer.files[0]); };
 // ?data=path loads a file served next to this page (e.g. from a local static server).
 const q = new URLSearchParams(location.search).get('data');
-if (q) fetch(q).then(r => r.json()).then(load).catch(err => alert('Could not load ' + q + ': ' + err.message));
+if (q) fetch(q).then(r => r.arrayBuffer()).then(buf => loadBuffer(buf, q.split('/').pop())).catch(err => alert('Could not load ' + q + ': ' + err.message));
 </script>
 </body>
 </html>

@@ -19,6 +19,7 @@ Options:
 - `--quietThreshold N` sets the births and total deaths threshold (default 10).
 - `--stableSamples N` requires both births and total deaths to remain below the threshold for this many consecutive samples (default 5).
 - `genome-snapshots.jsonl.gz` stores the exact genome population distribution at every reporting sample. Each genome is stored once per sample with its population count; it does not store one full genome per organism. Each line is its own gzip member, so the file stays append-only and a partial run is still readable (about 3 MB for a 50,000-tick run instead of about 30 MB). `--plainSnapshots` writes uncompressed `genome-snapshots.jsonl` instead; `readSnapshots(dir)` in `storage/local.js` reads either.
+- `--gridEvery T` also writes `grids.json`: the grid's cell colours every T ticks (at least one reporting period) plus the final grid. Each frame is one string with one character per cell (`.` empty, else `R`/`G`/`B`), indexed `col * rows + row` with odd columns shifted half a hex down, as the simulator draws it. Every 1,000 ticks costs about 6 KB per frame. Reading the grid doesn't touch the random number generator, so a seed still reproduces the same run.
 - `run.json` records the seed, parameters, stop reason and snapshot filename.
 - `--params '{"mutationRate":0.02}'` overrides parameters.
 
@@ -69,7 +70,9 @@ node analysis/genome-clusters.js analysis/runs/c1 analysis/runs/c2 ... > analysi
 node analysis/test-genome-clusters.js
 ```
 
-Open `genome-cluster-explorer.html` (repo root) and load the JSON.
+Open `genome-cluster-explorer.html` (repo root) and load the JSON. It also opens a `.hxlg` from the simulator's
+**Export lineage + genomes** button directly: it rebuilds the genomes of the organisms alive at export and clusters
+them in the browser (one checkpoint, the export tick; same numbers as the CLI on those genomes).
 
 `genome-clusters.js` clusters **every** surviving organism (no sampling) by **rule presence only**. Each genome
 becomes 252 bits (rule present or absent; output colour ignored). Two genomes differ by the number of
