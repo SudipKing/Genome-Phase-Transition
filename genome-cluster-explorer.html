@@ -165,7 +165,6 @@ tbody tr { cursor: pointer; }
 </main>
 <div id="tip"></div>
 
-<script src="./organismlog.js"></script>
 <script>
 'use strict';
 const SYM = 'RGBYCM';
@@ -231,6 +230,29 @@ function clustersAt(t) {
 }
 
 // ---------- .hxlg (lineage + genomes) → the same shape genome-clusters.js writes, one checkpoint
+// Reader for the "hex-ca-lineage-genomes-v1" file, same as OrganismLog.parse in organismlog.js. It lives
+// here so this page works on its own (opened from Downloads, an attachment, etc.) without organismlog.js.
+function parseHxlg(buf) {
+  const u8 = new Uint8Array(buf);
+  if (u8[0] !== 72 || u8[1] !== 88 || u8[2] !== 76 || u8[3] !== 71) throw new Error('Not a lineage + genomes file (missing HXLG marker).');
+  const headerLen = new DataView(buf).getUint32(8, true);
+  const header = JSON.parse(new TextDecoder().decode(u8.subarray(12, 12 + headerLen)));
+  const start = (12 + headerLen + 3) & ~3, types = {Int32Array, Uint32Array, Uint16Array, Int8Array};
+  const out = {header};
+  for (const sec of header.sections) out[sec.name] = new types[sec.type](buf, start + sec.offset, sec.length);
+  out.genomeOf = (id, into) => {   // replay rule changes from the founder down to `id`
+    const g = into || new Int8Array(header.ncond);
+    g.fill(-1);
+    const chain = [];
+    for (let a = id; a >= 0; a = out.parent[a]) chain.push(a);
+    for (let k = chain.length - 1; k >= 0; k--) {
+      const a = chain[k];
+      for (let d = out.deltaStart[a]; d < out.deltaStart[a + 1]; d++) g[out.deltaCond[d]] = out.deltaVal[d];
+    }
+    return g;
+  };
+  return out;
+}
 // The analysis below mirrors groupPatterns / spanningTree / mergeCurve / nearestHistogram in
 // analysis/genome-clusters.js; keep the two in step.
 function genomesFromHxlg(d) {
@@ -308,7 +330,7 @@ function phaseFromSeries(sr, present = 0.08) {   // same label as phaseLabel in 
   return order.map(i => SYM[i]).join('>') + (pop >= 0.95 ? ' full' : '');
 }
 function fromHxlg(buf, name) {
-  const d = OrganismLog.parse(buf), h = d.header;
+  const d = parseHxlg(buf), h = d.header;
   if (h.useHistory) throw new Error('This run used history rules; the cluster explorer does not support those conditions.');
   const genomes = genomesFromHxlg(d);
   if (!genomes.length) throw new Error('No organisms were alive at export, so there is nothing to cluster.');
