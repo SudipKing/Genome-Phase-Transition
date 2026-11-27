@@ -164,9 +164,427 @@ tbody tr { cursor: pointer; }
       <p style="margin:12px 0 4px" class="note">Representative genome (<code>.</code> = no rule, letter = output colour):</p>
       <div class="mono" id="repStr"></div>
     </section>
+
+    <!-- Cluster analysis: one tab per question. Each tab's view lives in its own <script id="view-..."> block
+         below and registers a redraw function with onViews(); the main script calls notifyViews() whenever the
+         run, checkpoint, threshold, method or selected cluster changes. -->
+    <section class="panel" id="anaPanel">
+      <div class="row" style="justify-content:space-between">
+        <h2 style="margin:0">Cluster analysis <span class="sub" id="anaWhich"></span></h2>
+        <span class="seg" id="anaTabs">
+          <button data-tab="cons" class="on">Rule conservation</button>
+          <button data-tab="compact">Compactness</button>
+          <button data-tab="lineage">Lineage vs genome</button>
+          <button data-tab="compare">Compare clusters</button>
+          <button data-tab="runs">Runs &amp; ticks</button>
+        </span>
+      </div>
+      <div class="anaTab" id="tab-cons"></div>
+      <div class="anaTab" id="tab-compact" hidden></div>
+      <div class="anaTab" id="tab-lineage" hidden></div>
+      <div class="anaTab" id="tab-compare" hidden></div>
+      <div class="anaTab" id="tab-runs" hidden></div>
+    </section>
   </div>
 </main>
 <div id="tip"></div>
+
+<!-- Cluster analysis core: pure calculations, no DOM. analysis/test-cluster-analysis.js extracts this block
+     by its id and runs it under Node, so keep it free of page globals. -->
+<script id="cluster-analysis-core">
+'use strict';
+// ================================================================================================
+// Definitions (all organism-weighted: an exact genome carried by k organisms counts k times)
+//
+// Genome string: one character per condition, '.' = no rule (the cell dies), otherwise the output colour.
+// Entry: {g, count, ids, pat} = one distinct exact genome in a cluster, how many organisms carry it, their
+//   organism ids (only .hxlg input has ids; null otherwise) and its presence-pattern index in the model.
+//
+// Distances between two genomes (A, B):
+//   presence  = conditions where exactly one of A, B has a rule. This IS the explorer's existing coarse
+//               distance (genome-clusters.js bitDistance / coarseDistance); clustering still uses only it.
+//   output    = conditions where both have a rule but the outputs differ (new; invisible to presence).
+//   fine      = presence + output = conditions whose character differs (genome-clusters.js fineDistance).
+//
+// Conservation of one condition x in a cluster of N organisms:
+//   carriers  = organisms with a rule at x; prevalence = carriers / N
+//   outs[k]   = carriers whose rule outputs colour k; agreement = max_k outs[k] / carriers (null if 0 carriers)
+//   level     = 'absent' (0) | 'minority' (<50%) | 'half' (50–<75%) | 'most' (75–<100%) | 'all' (100%)
+//   unanimous = carriers > 0 and every carrier has the same output
+// Presence and output are kept separate: a rule present in every member may still disagree on output.
+// ================================================================================================
+const GA = (() => {
+  const SYMS = 'RGBYCM';
+  const popcount = x => { x -= (x >>> 1) & 0x55555555; x = (x & 0x33333333) + ((x >>> 2) & 0x33333333); return (((x + (x >>> 4)) & 0x0F0F0F0F) * 0x01010101) >>> 24; };
+  const LEVELS = ['absent', 'minority', 'half', 'most', 'all'];
+  function levelOf(carriers, N) {
+    if (carriers === 0) return 'absent';
+    if (carriers === N) return 'all';
+    if (4 * carriers >= 3 * N) return 'most';
+    if (2 * carriers >= N) return 'half';
+    return 'minority';
+  }
+
+  // Flatten a cluster's presence patterns into its distinct exact genomes. No genome is copied: g is the
+  // string already held by the model.
+  function entriesFromPatterns(pats, mem) {
+    const out = [];
+    for (const i of mem) for (const e of pats[i].exact) out.push({g: e[0], count: e[1], ids: e[2] || null, pat: i});
+    return out;
+  }
+
+  // Bit encoding for fast pair distances: presence bits plus one bit set per output colour.
+  function encode(g, ncol) {
+    const W = Math.ceil(g.length / 32), pres = new Uint32Array(W), col = new Uint32Array(W * ncol);
+    for (let x = 0; x < g.length; x++) {
+      const ch = g[x]; if (ch === '.') continue;
+      const k = SYMS.indexOf(ch), w = x >>> 5, b = 1 << (x & 31);
+      pres[w] |= b; if (k >= 0 && k < ncol) col[k * W + w] |= b;
+    }
+    return {W, pres, col};
+  }
+  function pairDist(a, b, ncol) {
+    let p = 0, shared = 0, same = 0;
+    for (let w = 0; w < a.W; w++) {
+      p += popcount(a.pres[w] ^ b.pres[w]); shared += popcount(a.pres[w] & b.pres[w]);
+      for (let k = 0, o = 0; k < ncol; k++, o += a.W) same += popcount(a.col[o + w] & b.col[o + w]);
+    }
+    return {presence: p, output: shared - same, fine: p + shared - same, shared};
+  }
+  // Reference (string) version of the same distances, for tests and one-off checks.
+  function genomeDistance(g1, g2) {
+    let presence = 0, output = 0, shared = 0;
+    for (let x = 0; x < g1.length; x++) {
+      const a = g1[x] !== '.', b = g2[x] !== '.';
+      if (a !== b) presence++; else if (a) { shared++; if (g1[x] !== g2[x]) output++; }
+    }
+    return {presence, output, fine: presence + output, shared};
+  }
+
+  // ---------------------------------------------------------------- 1. rule conservation
+  function conservation(entries, ncond, ncol) {
+    let N = 0; for (const e of entries) N += e.count;
+    const carriers = new Float64Array(ncond), outs = new Float64Array(ncond * ncol);
+    for (const e of entries) {
+      const g = e.g, k = e.count;
+      for (let x = 0; x < ncond; x++) {
+        const ch = g[x]; if (ch === '.') continue;
+        const o = SYMS.indexOf(ch);
+        carriers[x] += k; if (o >= 0 && o < ncol) outs[x * ncol + o] += k;
+      }
+    }
+    const rows = [];
+    const summary = {organisms: N, conditions: ncond, presentAny: 0, atLeast: {100: 0, 75: 0, 50: 0, 25: 0},
+      levels: Object.fromEntries(LEVELS.map(l => [l, 0])), unanimous: 0, partialDisagreement: 0,
+      unanimousAt: {100: 0, 75: 0, 50: 0}, fullyConserved: 0, presenceAgreement: null, outputAgreement: null};
+    let presAgreeSum = 0, topSum = 0, carSum = 0;
+    for (let x = 0; x < ncond; x++) {
+      const c = carriers[x], o = Array.from(outs.subarray(x * ncol, x * ncol + ncol));
+      let top = -1, topCount = 0, tie = false;
+      o.forEach((v, k) => { if (v > topCount) { top = k; topCount = v; tie = false; } else if (v > 0 && v === topCount) tie = true; });
+      const level = N ? levelOf(c, N) : 'absent';
+      const row = {x, carriers: c, prevalence: N ? c / N : 0, outs: o, top, topCount, tie,
+        agreement: c > 0 ? topCount / c : null, unanimous: c > 0 && topCount === c, level};
+      rows.push(row);
+      summary.levels[level]++;
+      if (c > 0) {
+        summary.presentAny++;
+        if (row.unanimous) summary.unanimous++; else summary.partialDisagreement++;
+        presAgreeSum += Math.max(c, N - c) / N; topSum += topCount; carSum += c;
+      }
+      if (c === N && N > 0) { summary.atLeast[100]++; if (row.unanimous) { summary.unanimousAt[100]++; summary.fullyConserved++; } }
+      if (N > 0 && 4 * c >= 3 * N) { summary.atLeast[75]++; if (row.unanimous) summary.unanimousAt[75]++; }
+      if (N > 0 && 2 * c >= N) { summary.atLeast[50]++; if (row.unanimous) summary.unanimousAt[50]++; }
+      if (N > 0 && 4 * c >= N) summary.atLeast[25]++;
+    }
+    // presenceAgreement: over conditions carried by at least one member, the mean share of members that
+    //   agree with the majority presence state (1 = every such rule is in all members or a lone member).
+    // outputAgreement: over all (organism, rule) pairs, the share whose output equals that condition's
+    //   most common output in the cluster.
+    if (summary.presentAny) summary.presenceAgreement = presAgreeSum / summary.presentAny;
+    if (carSum) summary.outputAgreement = topSum / carSum;
+    return {N, ncond, ncol, rows, summary};
+  }
+
+  // ---------------------------------------------------------------- 2. compactness
+  // Organism-weighted pairwise distances. Two organisms with the same exact genome are a pair at distance 0.
+  // Exact over all distinct-genome pairs up to maxEntries (default 2500, ~3M pairs, under 1 s); above that a fixed
+  // stride sample of entries is used and the result says sampled: true.
+  function compactness(entries, ncol, repG, opts = {}) {
+    const maxEntries = opts.maxEntries || 2500;
+    let N = 0; for (const e of entries) N += e.count;
+    const res = {organisms: N, exactGenomes: entries.length, rulePatterns: new Set(entries.map(e => e.pat)).size,
+      sampled: false, pairs: N * (N - 1) / 2};
+    if (!N) return res;
+    res.genomesPerOrganism = entries.length / N;
+    res.patternsPerOrganism = res.rulePatterns / N;
+    let same = 0; for (const e of entries) same += e.count * (e.count - 1);
+    res.simpson = N > 1 ? 1 - same / (N * (N - 1)) : 0;   // P(two distinct random organisms differ in exact genome)
+    const ent = entries.map(e => ({e, enc: encode(e.g, ncol)}));
+    if (repG) {
+      const r = encode(repG, ncol);
+      let sP = 0, sF = 0, mP = 0, mF = 0;
+      for (const {e, enc} of ent) { const d = pairDist(r, enc, ncol); sP += d.presence * e.count; sF += d.fine * e.count; mP = Math.max(mP, d.presence); mF = Math.max(mF, d.fine); }
+      res.toRep = {meanPresence: sP / N, maxPresence: mP, meanFine: sF / N, maxFine: mF};
+    }
+    if (N < 2) { res.pairwise = null; return res; }
+    let use = ent;
+    if (ent.length > maxEntries) { const step = ent.length / maxEntries; use = Array.from({length: maxEntries}, (_, i) => ent[Math.floor(i * step)]); res.sampled = true; }
+    const acc = () => ({sum: 0, min: Infinity, max: 0});
+    const P = acc(), O = acc(), F = acc(), hist = [];
+    let W = 0;
+    for (const {e} of use) if (e.count > 1) { const w = e.count * (e.count - 1) / 2; W += w; P.min = O.min = F.min = 0; hist[0] = (hist[0] || 0) + w; }
+    for (let i = 0; i < use.length; i++) for (let j = i + 1; j < use.length; j++) {
+      const d = pairDist(use[i].enc, use[j].enc, ncol), w = use[i].e.count * use[j].e.count;
+      W += w; P.sum += w * d.presence; O.sum += w * d.output; F.sum += w * d.fine;
+      if (d.presence < P.min) P.min = d.presence; if (d.presence > P.max) P.max = d.presence;
+      if (d.output < O.min) O.min = d.output; if (d.output > O.max) O.max = d.output;
+      if (d.fine < F.min) F.min = d.fine; if (d.fine > F.max) F.max = d.fine;
+      hist[d.presence] = (hist[d.presence] || 0) + w;
+    }
+    const fin = a => ({mean: W ? a.sum / W : null, min: a.min === Infinity ? null : a.min, max: a.max});
+    res.pairwise = {presence: fin(P), output: fin(O), fine: fin(F), weight: W,
+      presenceHistogram: Array.from(hist, v => v || 0)};
+    return res;
+  }
+
+  // Distance matrix for a subset of entries (for drawing). Returns {n, presence: Int16Array, fine: Int16Array}.
+  function distanceMatrix(entries, ncol) {
+    const n = entries.length, enc = entries.map(e => encode(e.g, ncol));
+    const presence = new Int16Array(n * n), output = new Int16Array(n * n), fine = new Int16Array(n * n);
+    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+      const d = pairDist(enc[i], enc[j], ncol);
+      presence[i * n + j] = presence[j * n + i] = d.presence;
+      output[i * n + j] = output[j * n + i] = d.output;
+      fine[i * n + j] = fine[j * n + i] = d.fine;
+    }
+    return {n, presence, output, fine};
+  }
+
+  // ---------------------------------------------------------------- 3. lineage vs genome similarity
+  // L = {parent, founder, birth, death?, tick}: typed arrays from the .hxlg (every organism ever born).
+  // An organism's ancestor chain, root (founder) first. MRCA of two organisms = last shared element of their
+  // root-first chains; chains share a prefix and then never meet again, so the prefix is found by binary search.
+  function chainOf(L, id) {
+    const c = [];
+    for (let a = id; a >= 0; a = L.parent[a]) { c.push(a); if (c.length > 1e7) break; }
+    return c.reverse();
+  }
+  function commonPrefix(a, b) {   // index of the last shared ancestor, -1 if none (different founders)
+    let lo = 0, hi = Math.min(a.length, b.length) - 1;
+    if (hi < 0 || a[0] !== b[0]) return -1;
+    while (lo < hi) { const m = (lo + hi + 1) >> 1; if (a[m] === b[m]) lo = m; else hi = m - 1; }
+    return lo;
+  }
+  function pairRelation(L, ca, cb) {
+    const k = commonPrefix(ca, cb);
+    if (k < 0) return {sameFounder: false, mrca: null, genA: null, genB: null, treeDist: null, ageTicks: null};
+    const genA = ca.length - 1 - k, genB = cb.length - 1 - k, mrca = ca[k];
+    return {sameFounder: true, mrca, genA, genB, treeDist: genA + genB, ageTicks: L.tick - L.birth[mrca]};
+  }
+  // Spearman rank correlation (average ranks for ties); null when undefined.
+  function spearman(xs, ys) {
+    const n = xs.length; if (n < 3) return null;
+    const rank = v => { const idx = v.map((x, i) => [x, i]).sort((a, b) => a[0] - b[0]), r = new Float64Array(n);
+      for (let i = 0; i < n;) { let j = i; while (j + 1 < n && idx[j + 1][0] === idx[i][0]) j++; for (let k = i; k <= j; k++) r[idx[k][1]] = (i + j) / 2; i = j + 1; } return r; };
+    const rx = rank(xs), ry = rank(ys); let mx = 0, my = 0; for (let i = 0; i < n; i++) { mx += rx[i]; my += ry[i]; } mx /= n; my /= n;
+    let sxy = 0, sxx = 0, syy = 0; for (let i = 0; i < n; i++) { const a = rx[i] - mx, b = ry[i] - my; sxy += a * b; sxx += a * a; syy += b * b; }
+    return sxx && syy ? sxy / Math.sqrt(sxx * syy) : null;
+  }
+  const median = a => { if (!a.length) return null; const s = a.slice().sort((x, y) => x - y), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+
+  // Organisms of a cluster with their genome entry. Returns {members, missing} where missing counts organisms
+  // without a usable id.
+  function organismsOf(entries, L) {
+    const members = []; let missing = 0, noIds = 0;
+    entries.forEach((e, ei) => {
+      if (!e.ids) { noIds += e.count; return; }
+      for (const id of e.ids) if (id >= 0 && L && id < L.parent.length) members.push({id, ei}); else missing++;
+    });
+    return {members, missing, noIds};
+  }
+
+  // Lineage relations among a cluster's organisms. When the cluster has more than maxOrganisms organisms a
+  // fixed stride sample is used (sampled: true). genA/genB = generations from each organism up to the MRCA;
+  // treeDist = genA + genB (path length in the family tree); ageTicks = ticks since the MRCA was born.
+  function lineageRelations(L, entries, ncol, opts = {}) {
+    if (!L) return {available: false, reason: 'No family tree in this data. Lineage needs a .hxlg export (parent, founder and birth of every organism); genome-clusters.json carries genomes only.'};
+    const {members, missing, noIds} = organismsOf(entries, L);
+    if (noIds) return {available: false, reason: `${noIds} organisms in this cluster have no organism id, so they cannot be placed in the family tree.`};
+    if (!members.length) return {available: false, reason: 'None of this cluster\'s organisms were recorded in the lineage log.'};
+    const maxOrg = opts.maxOrganisms || 400, closeD = opts.closeDistance ?? 2;
+    let use = members, sampled = false;
+    if (members.length > maxOrg) { const step = members.length / maxOrg; use = Array.from({length: maxOrg}, (_, i) => members[Math.floor(i * step)]); sampled = true; }
+    const enc = entries.map(e => encode(e.g, ncol));
+    const chains = use.map(m => chainOf(L, m.id));
+    const founders = new Map(); for (const m of members) { const f = L.founder[m.id]; founders.set(f, (founders.get(f) || 0) + 1); }
+
+    // whole-cluster MRCA over all members (not just the sample)
+    // (a loop, not Math.max(...array): spreading >~120k members overflows the call stack)
+    let common = chainOf(L, members[0].id), cLen = common.length, maxChain = common.length;
+    for (let i = 1; i < members.length && cLen > 0; i++) {
+      const c = chainOf(L, members[i].id); if (c.length > maxChain) maxChain = c.length;
+      cLen = commonPrefix(common.slice(0, cLen), c) + 1;
+    }
+    const clusterMRCA = cLen > 0 ? {id: common[cLen - 1], ageTicks: L.tick - L.birth[common[cLen - 1]],
+      maxGenerations: maxChain - cLen} : null;
+
+    const GENS = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024];
+    const withinGen = new Array(GENS.length).fill(0);
+    let pairs = 0, sameFounder = 0, parentChild = 0, siblings = 0, identicalGenome = 0;
+    const scatter = [], byDist = new Map(), xsP = [], ysT = [], ysA = [];
+    const closeUnrelated = [], farRelated = [];
+    const nearestHit = []; // per organism: is its genetically nearest cluster-mate also among its closest relatives?
+    const n = use.length, dP = new Int16Array(n * n), tD = new Int32Array(n * n).fill(-1);
+    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+      const a = use[i], b = use[j], d = pairDist(enc[a.ei], enc[b.ei], ncol), r = pairRelation(L, chains[i], chains[j]);
+      dP[i * n + j] = dP[j * n + i] = d.presence;
+      pairs++;
+      if (a.ei === b.ei) identicalGenome++;
+      if (r.sameFounder) {
+        sameFounder++; tD[i * n + j] = tD[j * n + i] = r.treeDist;
+        if (r.treeDist === 1) parentChild++;
+        if (r.genA === 1 && r.genB === 1) siblings++;
+        const g = Math.max(r.genA, r.genB);
+        for (let k = 0; k < GENS.length; k++) if (g <= GENS[k]) withinGen[k]++;
+        xsP.push(d.presence); ysT.push(r.treeDist); ysA.push(r.ageTicks);
+      }
+      let bin = byDist.get(d.presence); if (!bin) byDist.set(d.presence, bin = {pairs: 0, differentFounder: 0, ages: [], tree: []});
+      bin.pairs++; if (!r.sameFounder) bin.differentFounder++; else { bin.ages.push(r.ageTicks); bin.tree.push(r.treeDist); }
+      if (scatter.length < 6000 || ((i * 31 + j * 17) % 7 === 0 && scatter.length < 20000))
+        scatter.push({i, j, presence: d.presence, fine: d.fine, output: d.output, treeDist: r.treeDist, ageTicks: r.ageTicks, sameFounder: r.sameFounder});
+      if (d.presence <= closeD && (!r.sameFounder || r.treeDist >= (opts.farGenerations ?? 40)))
+        closeUnrelated.push({a: a.id, b: b.id, presence: d.presence, fine: d.fine, treeDist: r.treeDist, ageTicks: r.ageTicks, sameFounder: r.sameFounder});
+      if (r.sameFounder && r.treeDist <= (opts.nearGenerations ?? 4) && d.presence >= (opts.farDistance ?? 8))
+        farRelated.push({a: a.id, b: b.id, presence: d.presence, fine: d.fine, treeDist: r.treeDist, ageTicks: r.ageTicks});
+    }
+    for (let i = 0; i < n; i++) {
+      let gMin = Infinity, tMin = Infinity, tAtG = Infinity;
+      for (let j = 0; j < n; j++) if (j !== i) { const t = tD[i * n + j] < 0 ? Infinity : tD[i * n + j]; if (t < tMin) tMin = t; }
+      for (let j = 0; j < n; j++) if (j !== i) gMin = Math.min(gMin, dP[i * n + j]);
+      for (let j = 0; j < n; j++) if (j !== i && dP[i * n + j] === gMin) { const t = tD[i * n + j] < 0 ? Infinity : tD[i * n + j]; if (t < tAtG) tAtG = t; }
+      if (n > 1) nearestHit.push(tMin !== Infinity && tAtG === tMin ? 1 : 0);
+    }
+    closeUnrelated.sort((x, y) => x.presence - y.presence || (y.treeDist ?? 1e9) - (x.treeDist ?? 1e9));
+    farRelated.sort((x, y) => y.presence - x.presence || x.treeDist - y.treeDist);
+    return {available: true, organisms: members.length, considered: n, sampled, missing,
+      founders: [...founders].sort((a, b) => b[1] - a[1]).map(([founder, count]) => ({founder, count, share: count / members.length})),
+      clusterMRCA, pairs, sameFounder, sameFounderShare: pairs ? sameFounder / pairs : null,
+      parentChild, siblings, identicalGenomePairs: identicalGenome,
+      sharedAncestorWithin: GENS.map((g, k) => ({generations: g, pairs: withinGen[k], share: pairs ? withinGen[k] / pairs : null})),
+      spearmanPresenceVsTree: spearman(xsP, ysT), spearmanPresenceVsAge: spearman(xsP, ysA),
+      nearestGenomeIsNearestRelative: nearestHit.length ? nearestHit.reduce((s, v) => s + v, 0) / nearestHit.length : null,
+      byPresenceDistance: [...byDist].sort((a, b) => a[0] - b[0]).map(([d, b]) => ({presence: d, pairs: b.pairs,
+        differentFounder: b.differentFounder, medianAgeTicks: median(b.ages), medianTreeDist: median(b.tree)})),
+      scatter, closeUnrelated: closeUnrelated.slice(0, 100), closeUnrelatedTotal: closeUnrelated.length,
+      farRelated: farRelated.slice(0, 100), farRelatedTotal: farRelated.length,
+      organismsUsed: use.map(m => m.id), presenceMatrix: dP, treeMatrix: tD};
+  }
+
+  // Order organism ids as a depth-first walk of their family tree (relatives end up adjacent).
+  function lineageOrder(L, ids) {
+    const ch = new Map(ids.map(id => [id, chainOf(L, id)]));
+    return ids.slice().sort((x, y) => {
+      const a = ch.get(x), b = ch.get(y);
+      for (let k = 0; k < Math.min(a.length, b.length); k++) if (a[k] !== b[k]) return a[k] - b[k];
+      return a.length - b.length;
+    });
+  }
+
+  // The family tree of a set of organisms with straight runs collapsed: kept nodes are the organisms, every
+  // ancestor where their lines split, and each founder. gens = generations to the kept parent.
+  function compressedTree(L, ids) {
+    const kids = new Map(), isMember = new Set(ids), roots = new Set();
+    for (const id of ids) {
+      const c = chainOf(L, id); roots.add(c[0]);
+      for (let k = 1; k < c.length; k++) { let s = kids.get(c[k - 1]); if (!s) kids.set(c[k - 1], s = new Set()); s.add(c[k]); }
+    }
+    const nodes = [];
+    const walk = (start, keptParent, gens) => {   // iterative down straight runs
+      let a = start, g = gens;
+      for (;;) {
+        const s = kids.get(a), keep = isMember.has(a) || roots.has(a) || (s && s.size > 1) || !s;
+        if (keep) {
+          nodes.push({id: a, parent: keptParent, gens: g, birth: L.birth[a], death: L.death ? L.death[a] : -1, member: isMember.has(a), founder: L.founder[a]});
+          if (s) for (const c of s) walk(c, a, 1);
+          return;
+        }
+        a = [...s][0]; g++;
+      }
+    };
+    for (const r of roots) walk(r, -1, 0);
+    return nodes;
+  }
+
+  // Organisms alive at tick T, from birth and death ticks (death = -1: still alive at export), using the
+  // simulator's export convention: an export labelled T holds the population at the START of tick T, before
+  // that tick's births and deaths. So: born before T, and not yet dead at T (death at T still counts as alive).
+  // Checked on real data: the tick-38,750 export rebuilds the tick-35,400 export exactly, ids and genomes.
+  function aliveAt(L, T) {
+    const out = [];
+    for (let id = 0; id < L.birth.length; id++) if (L.birth[id] < T && (L.death[id] < 0 || L.death[id] >= T)) out.push(id);
+    return out;
+  }
+
+  // ---------------------------------------------------------------- 4. comparing clusters
+  // TV = total variation distance between two output distributions (0 same, 1 disjoint).
+  function compareConservation(A, B) {
+    const rows = [];
+    const levels = [1, 0.75, 0.5, 0.25], sets = {};
+    for (const L of levels) sets[L] = {shared: 0, sharedSameOutput: 0, onlyA: 0, onlyB: 0};
+    let absDiff = 0, union = 0;
+    for (let x = 0; x < A.ncond; x++) {
+      const a = A.rows[x], b = B.rows[x];
+      let tv = null;
+      if (a.carriers > 0 && b.carriers > 0) { tv = 0; for (let k = 0; k < A.ncol; k++) tv += Math.abs(a.outs[k] / a.carriers - b.outs[k] / b.carriers); tv /= 2; }
+      const dPrev = a.prevalence - b.prevalence;
+      // distinguishing score: the larger of the prevalence gap and the output divergence on rules both carry,
+      // the latter weighted by the smaller prevalence so a rule carried by few members can't dominate.
+      const outScore = tv === null ? 0 : tv * Math.min(a.prevalence, b.prevalence);
+      rows.push({x, prevA: a.prevalence, prevB: b.prevalence, dPrev, topA: a.top, topB: b.top, tv,
+        outputDiffers: a.carriers > 0 && b.carriers > 0 && !a.tie && !b.tie && a.top !== b.top,
+        outputTie: a.tie || b.tie,   // a tied majority output has no single answer: counted as neither same nor different
+        score: Math.max(Math.abs(dPrev), outScore),
+        kind: Math.abs(dPrev) >= outScore ? 'presence' : 'output'});
+      if (a.carriers > 0 || b.carriers > 0) { union++; absDiff += Math.abs(dPrev); }
+      for (const L of levels) {
+        const inA = a.prevalence >= L - 1e-12, inB = b.prevalence >= L - 1e-12;
+        if (inA && inB) { sets[L].shared++; if (!a.tie && !b.tie && a.top === b.top) sets[L].sharedSameOutput++; }
+        else if (inA) sets[L].onlyA++; else if (inB) sets[L].onlyB++;
+      }
+    }
+    for (const L of levels) { const s = sets[L], u = s.shared + s.onlyA + s.onlyB; s.jaccard = u ? s.shared / u : null; }
+    return {rows, sets, prevalenceSimilarity: union ? 1 - absDiff / union : null,
+      distinguishing: rows.filter(r => r.score > 0).sort((p, q) => q.score - p.score)};
+  }
+
+  // ---------------------------------------------------------------- 5/6. population profiles (runs, ticks)
+  function populationProfile(pats, ncond, ncol) {
+    const all = entriesFromPatterns(pats, pats.map((_, i) => i));
+    const cons = conservation(all, ncond, ncol);
+    const prevalenceHistogram = new Array(10).fill(0);   // conditions by prevalence decile (absent excluded)
+    for (const r of cons.rows) if (r.carriers > 0) prevalenceHistogram[Math.min(9, Math.floor(r.prevalence * 10))]++;
+    let rules = 0; const outShare = new Array(ncol).fill(0);
+    for (const r of cons.rows) { rules += r.carriers; r.outs.forEach((v, k) => outShare[k] += v); }
+    const tot = outShare.reduce((s, v) => s + v, 0);
+    return {survivors: cons.N, uniqueGenomes: all.length, uniquePatterns: pats.length, conservation: cons,
+      meanRules: cons.N ? rules / cons.N : null, outputShare: outShare.map(v => tot ? v / tot : 0), prevalenceHistogram};
+  }
+  // Two datasets' genomes are comparable condition by condition only if they use the same colour count and
+  // the same condition list in the same order. Colours are NOT relabelled: R in one run is R in the other.
+  function compatible(runA, runB) {
+    if (runA.colours !== runB.colours) return {ok: false, reason: `different colour counts (${runA.colours} vs ${runB.colours})`};
+    if (runA.conditions.length !== runB.conditions.length) return {ok: false, reason: 'different condition counts'};
+    for (let x = 0; x < runA.conditions.length; x++) if (runA.conditions[x].join() !== runB.conditions[x].join()) return {ok: false, reason: `condition ${x} differs`};
+    return {ok: true};
+  }
+
+  return {SYMS, LEVELS, levelOf, entriesFromPatterns, encode, pairDist, genomeDistance, conservation, compactness,
+    distanceMatrix, chainOf, commonPrefix, pairRelation, spearman, median, organismsOf, lineageRelations, lineageOrder,
+    compressedTree, aliveAt, compareConservation, populationProfile, compatible};
+})();
+if (typeof module !== 'undefined') module.exports = GA;
+</script>
 
 <script>
 'use strict';
@@ -179,6 +597,19 @@ const esc = s => String(s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', 
 
 let DATA = null, run = null, cp = null, model = null, method = 'cc', selected = 0, clusters = [];
 const cache = new Map();
+
+// ---------- analysis views: each tab registers {tab, draw}; only the visible tab is drawn (on demand)
+const VIEWS = [];
+let activeTab = 'cons';
+function onViews(tab, draw) { VIEWS.push({tab, draw}); }
+function notifyViews() {
+  if (!clusters.length) return;
+  $('anaWhich').textContent = `· cluster ${selected + 1} of ${fmt(clusters.length)} at t = ${$('t').value} (${method === 'cc' ? 'connected' : 'representative'})`;
+  for (const v of VIEWS) if (v.tab === activeTab) { try { v.draw(); } catch (err) { console.error(err); $('tab-' + v.tab).insertAdjacentHTML('afterbegin', `<p class="warn">View error: ${esc(err.message)}</p>`); } }
+}
+function selectedEntries() { return GA.entriesFromPatterns(model.pats, clusters[selected].mem); }
+function clusterEntries(i) { return GA.entriesFromPatterns(model.pats, clusters[i].mem); }
+function repGenome(i) { return model.pats[clusters[i].rep].exact[0][0]; }
 
 // ---------- measurement (same as analysis/genome-clusters.js)
 function presenceBits(g) {
@@ -288,9 +719,9 @@ function parseHxlg(buf) {
 }
 // The analysis below mirrors groupPatterns / spanningTree / mergeCurve / nearestHistogram in
 // analysis/genome-clusters.js; keep the two in step.
-function genomesFromHxlg(d) {
+function genomesFromHxlg(d, ids) {   // ids: organisms to rebuild (default: those alive at export)
   const h = d.header, out = new Map(), g = new Int8Array(h.ncond), sym = '.' + SYM.slice(0, h.n);
-  for (const id of h.liveAtExport) {
+  for (const id of ids || h.liveAtExport) {
     if (id < 0 || id >= h.organisms) continue;   // not recorded (log disabled when it was born)
     d.genomeOf(id, g);
     let s = ''; for (let c = 0; c < h.ncond; c++) s += sym[g[c] + 1];
@@ -372,16 +803,24 @@ function fromHxlg(buf, name) {
   const cp = {tick: h.exportedAtTick, final: true, phase: phaseFromSeries(h.series), survivors: total,
     uniqueGenomes: genomes.length, uniquePatterns: pats.length, nearestNeighbour: nearestHistogram(pats, edges),
     mergeCurve: mergeCurve(pats, edges, total), mst: edges, patterns: pats.map(p => p.exact),
-    lineage: {parent: d.parent, founder: d.founder, birth: d.birth, tick: h.exportedAtTick}};   // in memory only; JSON input has none
-  return {format: 'genome-clusters/1', runs: [{name, seed: h.params && h.params.seed, colours: h.n, conditions: h.conditions, checkpoints: [cp]}]};
+    lineage: {parent: d.parent, founder: d.founder, birth: d.birth, death: d.death, tick: h.exportedAtTick}};   // in memory only; JSON input has none
+  // _hxlg: the parsed file, kept (it views the same buffer as lineage) so the Runs & ticks tab can rebuild earlier ticks
+  return {format: 'genome-clusters/1', runs: [{name, seed: h.params && h.params.seed, colours: h.n, conditions: h.conditions, checkpoints: [cp], _hxlg: d}]};
 }
 
 // ---------- loading
-function load(json) {
+function runOptions() { return DATA.runs.map((r, i) => `<option value="${i}">${esc(r.name)}${r.seed != null ? ` (seed ${esc(r.seed)})` : ''}</option>`).join(''); }
+function load(json, append = false) {   // append: add json's runs to the loaded data, keeping the current run and checkpoint
   if (json.format !== 'genome-clusters/1' || !json.runs) throw new Error('Not a genome-clusters.json file');
   if (!json.runs[0].checkpoints[0].patterns) throw new Error('This file was made with --slim; rerun without --slim for the explorer');
+  if (append && DATA) {
+    const keep = $('run').value, names = new Set(DATA.runs.map(r => r.name));
+    for (const r of json.runs) { let nm = r.name, k = 2; while (names.has(nm)) nm = `${r.name} (${k++})`; r.name = nm; names.add(nm); DATA.runs.push(r); }
+    $('run').innerHTML = runOptions(); $('run').value = keep;
+    return;
+  }
   DATA = json;
-  $('run').innerHTML = DATA.runs.map((r, i) => `<option value="${i}">${esc(r.name)}${r.seed != null ? ` (seed ${esc(r.seed)})` : ''}</option>`).join('');
+  $('run').innerHTML = runOptions();
   $('loader').hidden = true; $('app').hidden = false;
   pickRun(0);
 }
@@ -552,6 +991,7 @@ function drawGenome() {
     <td>${[...outs[x]].map(v => pct(v / carried[x])).join(' / ')}</td></tr>`).join('') ||
     '<tr><td colspan="3" class="note">No rule is carried by half the cluster.</td></tr>';
   $('repStr').textContent = repG;
+  notifyViews();
 }
 function tip(e, html) {
   const t = $('tip'); t.innerHTML = html; t.style.display = 'block';
@@ -560,19 +1000,25 @@ function tip(e, html) {
 
 // ---------- wiring
 $('t').oninput = () => render();
+document.querySelectorAll('#anaTabs button').forEach(b => b.onclick = () => {
+  activeTab = b.dataset.tab;
+  document.querySelectorAll('#anaTabs button').forEach(x => x.classList.toggle('on', x === b));
+  document.querySelectorAll('.anaTab').forEach(d => d.hidden = d.id !== 'tab-' + activeTab);
+  notifyViews();
+});
 $('run').onchange = e => pickRun(+e.target.value);
 $('cp').onchange = e => pickCp(+e.target.value);
 $('mCC').onclick = () => { method = 'cc'; $('mCC').classList.add('on'); $('mRep').classList.remove('on'); render(); };
 $('mRep').onclick = () => { method = 'rep'; $('mRep').classList.add('on'); $('mCC').classList.remove('on'); render(); };
 function isHxlg(buf) { const u = new Uint8Array(buf, 0, Math.min(4, buf.byteLength)); return u[0] === 72 && u[1] === 88 && u[2] === 76 && u[3] === 71; }
-async function loadBuffer(buf, name) {
+async function loadBuffer(buf, name, append = false) {
   if (isHxlg(buf)) {
     $('status').textContent = 'Rebuilding genomes and clustering the living population…';
     await new Promise(r => setTimeout(r, 30));   // let the message paint before the heavy work
     const t0 = performance.now();
-    load(fromHxlg(buf, name.replace(/\.hxlg$/i, '')));
+    load(fromHxlg(buf, name.replace(/\.hxlg$/i, '')), append);
     $('status').textContent = `Clustered in ${((performance.now() - t0) / 1000).toFixed(1)} s.`;
-  } else load(JSON.parse(new TextDecoder().decode(buf)));
+  } else load(JSON.parse(new TextDecoder().decode(buf)), append);
 }
 function readFile(f) {
   f.arrayBuffer().then(buf => loadBuffer(buf, f.name)).catch(err => { $('status').textContent = ''; alert(err.message); });
@@ -585,6 +1031,1141 @@ drop.ondrop = e => { e.preventDefault(); drop.style.borderColor = ''; e.dataTran
 // ?data=path loads a file served next to this page (e.g. from a local static server).
 const q = new URLSearchParams(location.search).get('data');
 if (q) fetch(q).then(r => r.arrayBuffer()).then(buf => loadBuffer(buf, q.split('/').pop())).catch(err => alert('Could not load ' + q + ': ' + err.message));
+</script>
+
+<!-- ===== view-conservation / view-compact / view-compare (tabs cons, compact, compare) ===== -->
+<style id="style-conservation">
+.cv-bar { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; margin: 12px 0 10px; }
+.cv-bar .lbl { color: var(--muted); font-size: 12px; margin-right: 6px; }
+.cv-bar .seg button { padding: 3px 8px; font-size: 12px; }
+.cv-bar .seg button + button { border-left: none; }
+.cv-bar .seg button:not(:first-child):not(:last-child) { border-radius: 0; }
+.cv-tiles { grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); }
+.cv-tiles .tile { cursor: help; }
+.cv-tiles .tile .v { font-size: 19px; }
+.cv-of { font-size: 12px; color: var(--muted); font-weight: 500; }
+details.cv-defs { margin: 8px 0 0; font-size: 12px; color: var(--muted); }
+details.cv-defs summary { cursor: pointer; }
+details.cv-defs dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 6px 0 0; }
+details.cv-defs dt { color: var(--ink); }
+details.cv-defs dd { margin: 0; }
+.cv-grid { margin-top: 4px; }
+.cv-grid .cell { cursor: pointer; }
+.cv-grid .cell.cv-abs { background: transparent; box-shadow: inset 0 0 0 1px var(--line); }
+.cv-grid .cell.cv-all { box-shadow: inset 0 0 0 1.5px var(--ink); }
+.cv-grid .cell.cv-dis::before, .cv-lg .cv-dis::before { content: ""; position: absolute; top: 0; right: 0; width: 60%; aspect-ratio: 1; background: linear-gradient(to bottom left, var(--ink) 50%, transparent 50%); }
+.cv-grid .cell.cv-dim { opacity: .28; }
+.cv-tbl td, .cv-tbl th { padding: 4px 6px; }
+.cv-tbl td.l .cv-ob + span, .cv-otxt { font-size: 11px; color: var(--muted); }
+.cv-grid .cell.cv-pin { outline: 2px solid var(--accent); outline-offset: 1px; z-index: 1; }
+.cv-small .cell { aspect-ratio: 1 / 1.5; }
+.cv-small .cell.rep::after { display: none; }
+.cv-lg { display: flex; flex-wrap: wrap; gap: 6px 14px; color: var(--muted); font-size: 12px; margin-top: 10px; align-items: center; }
+.cv-lg .s { display: inline-block; position: relative; width: 11px; height: 18px; border-radius: 1px; vertical-align: -5px; margin-right: 4px; background: var(--empty); }
+.cv-pinbox { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin-top: 10px; font-size: 12px; }
+.cv-ob { display: inline-flex; width: 70px; height: 8px; border-radius: 2px; overflow: hidden; background: var(--empty); vertical-align: 0; }
+.cv-ob i { display: block; height: 100%; }
+.cv-flag { color: var(--Y); font-weight: 650; }
+.cv-h3 { font-size: 13px; margin: 16px 0 6px; font-weight: 650; }
+.cv-tbl td.l, .cv-tbl th.l { text-align: left; }
+.cv-tbl tbody tr { cursor: default; }
+.cv-tbl tbody tr[data-pin] { cursor: pointer; }
+.cv-tbl td.wrap { white-space: normal; color: var(--muted); font-size: 12px; text-align: left; }
+.cv-check { display: grid; grid-template-columns: repeat(auto-fill, minmax(165px, 1fr)); gap: 2px 10px; max-height: 190px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
+.cv-check label { flex-direction: row; align-items: center; gap: 4px; font-size: 12px; color: var(--ink); cursor: pointer; }
+.cv-check label.off { color: var(--muted); }
+.cv-mx td { text-align: center; min-width: 64px; }
+.cv-trio { display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr); }
+.cv-canvas { border: 1px solid var(--line); max-width: 100%; image-rendering: pixelated; display: block; }
+.cv-grad { display: inline-block; width: 120px; height: 9px; border-radius: 2px; vertical-align: -1px; margin: 0 4px; border: 1px solid var(--line); }
+.cv-scatter circle { cursor: pointer; }
+</style>
+<script id="view-conservation">
+'use strict';
+// Views for the tabs "Rule conservation" (cons), "Compactness" (compact) and "Compare clusters" (compare).
+// All state lives inside CONSV. The pure helpers at the top touch no DOM or page globals except GA, so a
+// Node harness can run them: under Node (no document) the IIFE returns them before wiring any view.
+const CONSV = (() => {
+  // ============================================================== pure helpers
+  const THRESH = [{id: '100', min: 1, label: '100%'}, {id: '75', min: 0.75, label: '≥75%'}, {id: '50', min: 0.5, label: '≥50%'},
+    {id: '25', min: 0.25, label: '≥25%'}, {id: 'any', min: 0, label: 'any'}];
+  const LEVEL_FILL = {all: 100, most: 72, half: 48, minority: 24, absent: 0};
+  const LEVEL_NAME = {all: 'all (100%)', most: 'most (75–<100%)', half: 'half (50–<75%)', minority: 'minority (<50%)', absent: 'absent'};
+
+  // A condition meets a prevalence threshold when at least one member carries it and prevalence >= min
+  // ('100%' means every member; 'any' means at least one carrier).
+  function meets(r, min) { return r.carriers > 0 && (min >= 1 ? r.level === 'all' : r.prevalence >= min - 1e-12); }
+  // Rules meeting the threshold, most conserved first: prevalence, then output agreement, then condition.
+  function rankRules(cons, min) {
+    return cons.rows.filter(r => meets(r, min)).sort((a, b) => b.prevalence - a.prevalence || b.agreement - a.agreement || a.x - b.x);
+  }
+  // Most disputed outputs: carried widely but carriers disagree. score = prevalence × (1 − agreement).
+  function disputeScore(r) { return r.carriers > 0 ? r.prevalence * (1 - r.agreement) : 0; }
+  function disputed(cons, k = 10, minPrev = 0.25) {
+    return cons.rows.filter(r => r.carriers > 0 && !r.unanimous && r.prevalence >= minPrev - 1e-12)
+      .sort((a, b) => disputeScore(b) - disputeScore(a) || b.prevalence - a.prevalence || a.x - b.x).slice(0, k);
+  }
+  // Fill strength (%) for "colour by output agreement": chance level (1/ncol) -> 15%, unanimous -> 100%.
+  function agreeFill(a, ncol) { if (a == null) return 0; if (ncol < 2) return 100; const lo = 1 / ncol; return Math.round(15 + 85 * Math.max(0, (a - lo) / (1 - lo))); }
+
+  const csvCell = v => { const s = v == null ? '' : String(v); return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  // Full conservation table, one row per condition (all of them, absent ones included).
+  function consCSV(cons, conditions, sym, textOf, repG) {
+    const K = cons.ncol, cols = Array.from({length: K}, (_, k) => sym[k]);
+    const head = ['condition', 'self_colour', ...cols.map(c => 'nb_' + c), 'nb_empty', 'neighbourhood', 'organisms', 'carriers', 'prevalence', 'level',
+      ...cols.map(c => 'out_' + c), ...cols.map(c => 'out_share_' + c), 'majority_output', 'majority_tie', 'output_agreement', 'unanimous',
+      'fully_conserved', 'rep_output'];
+    const lines = [head.join(',')];
+    for (const r of cons.rows) {
+      const cond = conditions[r.x], nb = cond.slice(1), empty = 6 - nb.reduce((s, v) => s + v, 0);
+      lines.push([r.x, sym[cond[0]], ...nb, empty, textOf(r.x), cons.N, r.carriers, r.prevalence.toFixed(6), r.level,
+        ...r.outs, ...r.outs.map(v => r.carriers ? (v / r.carriers).toFixed(6) : ''),
+        r.top >= 0 ? sym[r.top] : '', r.tie ? 1 : 0, r.agreement == null ? '' : r.agreement.toFixed(6), r.unanimous ? 1 : 0,
+        r.level === 'all' && r.unanimous ? 1 : 0, repG ? (repG[r.x] === '.' ? '' : repG[r.x]) : ''].map(csvCell).join(','));
+    }
+    return lines.join('\r\n') + '\r\n';
+  }
+  // Greedy nearest-neighbour ordering of an n×n distance matrix (flat), starting at `start`; ties go to the
+  // lower index (entries are sorted most common first), so families of near-identical genomes end up adjacent.
+  function nnOrder(n, D, start = 0) {
+    if (!n) return [];
+    const used = new Uint8Array(n), order = [start]; used[start] = 1;
+    for (let k = 1, cur = start; k < n; k++) {
+      let best = -1, bd = Infinity;
+      for (let j = 0; j < n; j++) if (!used[j] && D[cur * n + j] < bd) { bd = D[cur * n + j]; best = j; }
+      used[best] = 1; order.push(best); cur = best;
+    }
+    return order;
+  }
+  // The `cap` most common distinct genomes of a cluster, always including the representative genome.
+  function topEntries(entries, cap, repG) {
+    const all = entries.map((e, k) => ({e, k})).sort((a, b) => b.e.count - a.e.count || a.k - b.k).map(o => o.e);
+    const list = all.slice(0, cap);
+    let repIdx = list.findIndex(e => e.g === repG);
+    if (repIdx < 0) { const r = all.find(e => e.g === repG); if (r) { list[list.length - 1] = r; repIdx = list.length - 1; } else repIdx = 0; }
+    let shown = 0, total = 0; for (const e of list) shown += e.count; for (const e of all) total += e.count;
+    return {list, repIdx, distinct: all.length, organismsShown: shown, organisms: total};
+  }
+  // Identity of a cluster's member set (pattern indices in the cluster's own order), for caching.
+  function memKey(mem) { let h = 0x811c9dc5; for (const v of mem) { h ^= v & 0xffff; h = Math.imul(h, 0x01000193); h ^= v >>> 16; h = Math.imul(h, 0x01000193); } return mem.length + ':' + (h >>> 0).toString(36); }
+  // Clusters for the scatter: at least minSize organisms, at most `cap` of the largest (clusters are sorted largest first).
+  function scatterCandidates(cls, minSize, cap = 80) { const out = []; for (let i = 0; i < cls.length && out.length < cap; i++) if (cls[i].organisms >= minSize) out.push(i); return out; }
+  // Chaining: connected components may join members whose furthest pair is > t apart (through intermediates);
+  // the representative method bounds the diameter by 2t (each member within t of the representative).
+  function chainInfo(maxPair, t, method) { return {maxPair, t, chained: maxPair > t, bound: method === 'cc' ? null : 2 * t}; }
+  // Similarity of two clusters for the matrix.
+  function pairSummary(cmp, repA, repB) {
+    const d = GA.genomeDistance(repA, repB);
+    return {prevSim: cmp.prevalenceSimilarity, jac50: cmp.sets[0.5].jaccard, repP: d.presence, repO: d.output, repF: d.fine};
+  }
+  const pure = {THRESH, LEVEL_FILL, meets, rankRules, disputed, disputeScore, agreeFill, consCSV, nnOrder, topEntries, memKey,
+    scatterCandidates, chainInfo, pairSummary};
+  if (typeof document === 'undefined') return pure;
+
+  // ============================================================== page state and caches
+  const S = {consMin: '50', consMode: 'prev', pin: null, matMetric: 'presence', scMin: 5, exactFor: new Set(),
+    cmpSel: [], cmpCustom: false, cmpClusters: null, cmpA: null, cmpB: null, cmpMetric: 'prevSim'};
+  const cache = new Map();
+  let cacheModel = null;
+  function cget(key, fn) {
+    if (cacheModel !== model) { cache.clear(); cacheModel = model; S.exactFor.clear(); }
+    if (cache.has(key)) return cache.get(key);
+    if (cache.size > 3000) cache.clear();
+    const v = fn(); cache.set(key, v); return v;
+  }
+  const has = key => cacheModel === model && cache.has(key);
+  const ckeys = new WeakMap();
+  function ckey(c) { let k = ckeys.get(c); if (!k) ckeys.set(c, k = memKey(c.mem)); return k; }
+  const consOf = i => cget('cons|' + ckey(clusters[i]), () => GA.conservation(clusterEntries(i), run.conditions.length, run.colours));
+  const compKey = (i, maxE) => 'cpt|' + (maxE || 'full') + '|' + ckey(clusters[i]);
+  const compOf = (i, maxE) => cget(compKey(i, maxE), () => GA.compactness(clusterEntries(i), run.colours, repGenome(i), {maxEntries: maxE || 1e9}));   // no maxE = exact over all pairs
+  const tNow = () => +$('t').value;
+  const hideTip = () => { $('tip').style.display = 'none'; };
+  const colVar = k => k >= 0 ? `var(--${SYM[k]})` : 'var(--bar2)';
+  const mixBg = (col, p) => `background:color-mix(in srgb, ${col} ${Math.round(p)}%, var(--empty))`;
+  const num = (v, d = 2) => v == null ? '—' : (Number.isInteger(v) ? fmt(v) : v.toFixed(d));
+  const pc = v => v == null ? '—' : pct(v);
+  const cname = i => `#${i + 1}`;
+  const sw = i => `<span class="sw" style="background:${clColour(i)}"></span>`;
+
+  // 3 rows (current-cell colour) × 84 neighbourhoods, condition order, like the "Cluster genome" panel.
+  function heatHTML(cellFn, cls = '') {
+    const by = Array.from({length: run.colours}, () => []);
+    run.conditions.forEach((cond, x) => by[cond[0]].push(x));
+    const cols = Math.max(...by.map(a => a.length));
+    let h = `<div class="genome cv-grid ${cls}" style="grid-template-columns:24px repeat(${cols}, minmax(0, 1fr))">`;
+    by.forEach((xs, s) => { h += `<div class="lab">${SYM[s]}</div>`; for (const x of xs) h += cellFn(x); for (let k = xs.length; k < cols; k++) h += '<div></div>'; });
+    return h + '</div>';
+  }
+  function wireGrid(el, tipFn, clickFn) {
+    if (!el) return;
+    el.onmousemove = e => { const c = e.target.closest('[data-x]'); if (!c) return hideTip(); tip(e, tipFn(+c.dataset.x)); };
+    el.onmouseleave = hideTip;
+    if (clickFn) el.onclick = e => { const c = e.target.closest('[data-x]'); if (c) clickFn(+c.dataset.x); };
+  }
+  // One conservation cell. mode 'prev': strength = prevalence level; 'agree': strength = output agreement.
+  function consCell(r, opt) {
+    let cls = 'cell', st = '';
+    if (opt.repG && opt.repG[r.x] !== '.') cls += ' rep';
+    if (!r.carriers) cls += ' cv-abs';
+    else {
+      st = mixBg(colVar(r.top), opt.mode === 'agree' ? agreeFill(r.agreement, run.colours) : LEVEL_FILL[r.level]);
+      if (!r.unanimous) cls += ' cv-dis';
+      if (r.level === 'all' && opt.mode !== 'agree') cls += ' cv-all';
+    }
+    if (opt.min != null && !meets(r, opt.min)) cls += ' cv-dim';
+    if (opt.pin === r.x) cls += ' cv-pin';
+    return `<div class="${cls}" style="${st}" data-x="${r.x}"></div>`;
+  }
+  function outBar(r) {
+    if (!r.carriers) return '<span class="note">—</span>';
+    return `<span class="cv-ob">${r.outs.map((v, k) => v ? `<i style="width:${100 * v / r.carriers}%;background:${colVar(k)}"></i>` : '').join('')}</span> ` +
+      `<span class="cv-otxt">${r.outs.map((v, k) => `${SYM[k]} ${Math.round(100 * v / r.carriers)}`).join(' / ')}%</span>`;
+  }
+  function consTipHTML(cons, x, repG) {
+    const r = cons.rows[x];
+    let h = `<strong>${esc(ruleText(x))}</strong> <span class="note">cond. ${x}</span><br>carriers: ${fmt(r.carriers)} of ${fmt(cons.N)} (${pct(r.prevalence)}) · ${LEVEL_NAME[r.level]}`;
+    if (r.carriers) {
+      h += '<br>outputs among carriers: ' + r.outs.map((v, k) => `${SYM[k]} ${fmt(v)} (${pct(v / r.carriers)})`).join(' · ');
+      h += `<br>output agreement: ${pct(r.agreement)} ${r.unanimous ? '(unanimous)' : r.tie ? '(tie for majority)' : '(outputs differ)'}`;
+    }
+    if (repG) h += `<br>representative: ${repG[x] === '.' ? 'no rule' : '→ ' + repG[x]}`;
+    return h;
+  }
+  function download(name, text, type = 'text/csv') {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([text], {type}));
+    a.download = name; document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  }
+  const safe = s => String(s).replace(/[^\w.-]+/g, '_');
+  function segHTML(attr, items, cur) { return `<span class="seg">${items.map(([v, l, t]) => `<button data-${attr}="${v}" class="${v === cur ? 'on' : ''}"${t ? ` title="${esc(t)}"` : ''}>${l}</button>`).join('')}</span>`; }
+  function hexRGB(h) { h = (h || '').trim(); if (/^#[0-9a-f]{3}$/i.test(h)) h = '#' + [...h.slice(1)].map(c => c + c).join(''); const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})/i.exec(h); return m ? [1, 2, 3].map(k => parseInt(m[k], 16)) : [128, 128, 128]; }
+
+  // ============================================================== tab: rule conservation
+  function drawCons() {
+    const root = $('tab-cons'), i = selected, c = clusters[i], cons = consOf(i), s = cons.summary, N = cons.N, repG = repGenome(i);
+    const th = THRESH.find(o => o.id === S.consMin), min = th.min, P = s.presentAny;
+    const tiles = [
+      ['Organisms (N)', fmt(N), 'Organisms in this cluster. Every share on this tab is organism-weighted (a genome carried by k organisms counts k times).'],
+      ['Rules in 100%', fmt(s.atLeast[100]), 'PRESENCE: conditions where every member has a rule (whatever its output).'],
+      ['Rules in ≥75%', fmt(s.atLeast[75]), 'PRESENCE: conditions where at least 75% of members have a rule.'],
+      ['Rules in ≥50%', fmt(s.atLeast[50]), 'PRESENCE: conditions where at least half of members have a rule.'],
+      ['Rules in ≥25%', fmt(s.atLeast[25]), 'PRESENCE: conditions where at least 25% of members have a rule.'],
+      ['Present in any', `${fmt(P)}<span class="cv-of"> / ${run.conditions.length}</span>`, 'PRESENCE: conditions where at least one member has a rule.'],
+      ['Unanimous output', `${fmt(s.unanimous)}<span class="cv-of"> / ${fmt(P)}</span>`, 'OUTPUT: present conditions where every carrier has the same output colour.'],
+      ['Outputs differ', `${fmt(s.partialDisagreement)}<span class="cv-of"> / ${fmt(P)}</span>`, 'OUTPUT: present conditions where carriers have two or more different output colours.'],
+      ['Fully conserved', fmt(s.fullyConserved), 'BOTH: present in 100% of members AND every member has the same output.'],
+      ['Presence agreement', pc(s.presenceAgreement), 'PRESENCE ONLY (outputs ignored): over conditions present in at least one member, the mean share of members on the majority side of "has a rule / has no rule". 100% = every such rule is in all members.'],
+      ['Output agreement', pc(s.outputAgreement), 'OUTPUT ONLY (which members lack a rule is ignored): over all (organism, rule) pairs, the share whose output equals that condition\'s most common output in the cluster.'],
+    ];
+    const notes = [];
+    if (N === 1) notes.push('Single organism: every rule it carries is trivially present in 100% and unanimous, so conservation says nothing here.');
+    else if (c.exact === 1) notes.push(`All ${fmt(N)} members carry one identical genome: every rule present is in 100% of members with a unanimous output.`);
+    else if (c.mem.length === 1) notes.push(`All members share one rule (presence) pattern, so presence is 100% wherever present; only outputs can differ.`);
+    const ranked = rankRules(cons, min), disp = disputed(cons, 10, 0.25);
+    const listRow = r => `<tr data-pin="${r.x}"><td class="l">${esc(ruleText(r.x))}</td><td>${fmt(r.carriers)}</td><td>${pct(r.prevalence)}</td>
+      <td class="l">${outBar(r)}</td><td>${pc(r.agreement)}</td><td>${repG[r.x] === '.' ? '<span class="note">–</span>' : repG[r.x]}</td>
+      <td class="l">${r.unanimous ? '' : `<span class="cv-flag" title="${r.tie ? 'Tie for the majority output' : 'Carriers disagree on the output'}">${r.tie ? 'tie' : 'differs'}</span>`}</td></tr>`;
+    const head = `<thead><tr><th class="l">Condition</th><th>Carriers</th><th>Prevalence</th><th class="l">Outputs among carriers</th><th title="OUTPUT agreement: share of carriers with the majority output">Out. agr.</th><th title="Representative genome's output">Rep.</th><th class="l"></th></tr></thead>`;
+    root.innerHTML = `
+      <div class="tiles cv-tiles" style="margin-top:12px">${tiles.map(([k, v, d]) => `<div class="tile" title="${esc(d)}"><div class="v">${v}</div><div class="k">${k}</div></div>`).join('')}</div>
+      <details class="cv-defs"><summary>Definitions (presence and output are measured separately)</summary><dl>
+        ${tiles.map(([k, , d]) => `<dt>${k}</dt><dd>${esc(d)}</dd>`).join('')}
+        <dt>Prevalence</dt><dd>carriers / N, where carriers = members with a rule at the condition (any output).</dd>
+        <dt>Output agreement (one condition)</dt><dd>share of carriers whose output is the most common one; unanimous = 100%.</dd></dl></details>
+      ${notes.length ? `<p class="note warn" style="margin:8px 0 0">${notes.join(' ')}</p>` : ''}
+      <div class="cv-bar">
+        <span><span class="lbl">Show rules carried by</span>${segHTML('cmin', THRESH.map(o => [o.id, o.label]), S.consMin)}</span>
+        <span><span class="lbl">Fill strength</span>${segHTML('cmode', [['prev', 'prevalence', 'Fill strength = prevalence level (presence)'], ['agree', 'output agreement', 'Fill strength = share of carriers with the majority output']], S.consMode)}</span>
+        <button id="cv-csv" title="All ${run.conditions.length} conditions with carriers, prevalence, output counts and agreement">Download CSV (${run.conditions.length} rows)</button>
+      </div>
+      ${heatHTML(x => consCell(cons.rows[x], {repG, mode: S.consMode, min, pin: S.pin}))}
+      <div class="cv-lg">
+        <span>Colour = majority output among carriers.</span>
+        ${S.consMode === 'prev'
+          ? `<span>Strength = presence level:</span>
+             <span><span class="s" style="background:transparent;box-shadow:inset 0 0 0 1px var(--line)"></span>absent</span>
+             <span><span class="s" style="${mixBg('var(--muted)', 24)}"></span>&lt;50%</span>
+             <span><span class="s" style="${mixBg('var(--muted)', 48)}"></span>50–75%</span>
+             <span><span class="s" style="${mixBg('var(--muted)', 72)}"></span>75–&lt;100%</span>
+             <span><span class="s" style="${mixBg('var(--muted)', 100)};box-shadow:inset 0 0 0 1.5px var(--ink)"></span>100% (framed)</span>`
+          : `<span>Strength = output agreement among carriers:</span>
+             <span><span class="s" style="${mixBg('var(--muted)', 15)}"></span>chance (1/${run.colours})</span>
+             <span><span class="s" style="${mixBg('var(--muted)', 57)}"></span>mixed</span>
+             <span><span class="s" style="${mixBg('var(--muted)', 100)}"></span>unanimous</span>`}
+        <span><span class="s cv-dis" style="${mixBg('var(--muted)', 60)}"></span>corner notch = outputs differ</span>
+        <span>underline = in representative</span>
+        <span>faded = below the "${esc(th.label)}" filter</span>
+        <span>Click a cell to pin it.</span>
+      </div>
+      <div id="cv-pinbox"></div>
+      <div class="two" style="margin-top:6px">
+        <div><h3 class="cv-h3">Rules carried by ${esc(th.label === 'any' ? 'any member' : th.label + ' of members')} (${fmt(ranked.length)}), most conserved first</h3>
+          <div class="tablewrap" style="max-height:340px"><table class="cv-tbl">${head}<tbody>${ranked.map(listRow).join('') || '<tr><td colspan="7" class="note l">No condition meets this threshold.</td></tr>'}</tbody></table></div></div>
+        <div><h3 class="cv-h3" title="Score = prevalence × (1 − output agreement); only conditions carried by ≥25% of members whose outputs are not unanimous">Most disputed outputs (≥25% carry it, outputs differ)</h3>
+          <div class="tablewrap" style="max-height:340px"><table class="cv-tbl">${head}<tbody>${disp.map(listRow).join('') || '<tr><td colspan="7" class="note l">No widely carried rule has disagreeing outputs.</td></tr>'}</tbody></table></div></div>
+      </div>`;
+    const pinTo = x => { S.pin = S.pin === x ? null : x; drawCons(); };
+    root.querySelectorAll('[data-cmin]').forEach(b => b.onclick = () => { S.consMin = b.dataset.cmin; drawCons(); });
+    root.querySelectorAll('[data-cmode]').forEach(b => b.onclick = () => { S.consMode = b.dataset.cmode; drawCons(); });
+    root.querySelectorAll('tr[data-pin]').forEach(tr => tr.onclick = () => pinTo(+tr.dataset.pin));
+    $('cv-csv').onclick = () => download(`conservation_${safe(run.name)}_tick${cp.tick}_${method}_t${tNow()}_cluster${i + 1}.csv`,
+      consCSV(cons, run.conditions, SYM, ruleText, repG));
+    wireGrid(root.querySelector('.cv-grid'), x => consTipHTML(cons, x, repG), pinTo);
+    if (S.pin != null && S.pin < cons.rows.length) {
+      $('cv-pinbox').innerHTML = `<div class="cv-pinbox"><button id="cv-unpin" style="float:right;padding:1px 6px">unpin</button><span class="note">Pinned condition (stays pinned when you select another cluster)</span><br>${consTipHTML(cons, S.pin, repG)}</div>`;
+      $('cv-unpin').onclick = () => pinTo(S.pin);
+    }
+  }
+
+  // ============================================================== tab: compactness
+  let cptTok = 0, scTok = 0;
+  function drawCompact() {
+    const root = $('tab-compact'), i = selected, c = clusters[i], t = tNow(), tok = ++cptTok;
+    const exactOK = c.exact <= 2500 || S.exactFor.has(ckey(c));
+    root.innerHTML = `
+      <div class="two" style="margin-top:12px">
+        <div><h3 class="cv-h3" style="margin-top:0">Cluster ${cname(i)}: size, diversity and distances</h3><div id="cv-ctab"><p class="note">Computing…</p></div></div>
+        <div><h3 class="cv-h3" style="margin-top:0">Chaining</h3><div id="cv-chain"></div>
+          <h3 class="cv-h3">Pairwise presence distance between members (organism-weighted)</h3><div id="cv-hist"></div></div>
+      </div>
+      <h3 class="cv-h3">Compactness across clusters</h3>
+      <div class="cv-bar" style="margin-top:0"><label style="flex-direction:row;align-items:center;gap:6px">Clusters with at least
+        <input type="number" id="cv-scmin" min="1" value="${S.scMin}" style="width:70px"> organisms (up to the 80 largest)</label><span class="note cv-prog"></span></div>
+      <div id="cv-scatter"></div>
+      <h3 class="cv-h3">Distance matrix of the most common distinct genomes</h3>
+      <div class="cv-bar" style="margin-top:0">${segHTML('mm', [['presence', 'presence', 'Rules present in exactly one genome (clustering distance)'], ['output', 'output', 'Rules both carry with different outputs'], ['fine', 'fine', 'presence + output']], S.matMetric)}<span class="note" id="cv-matnote"></span></div>
+      <div id="cv-mat"></div>`;
+    root.querySelectorAll('[data-mm]').forEach(b => b.onclick = () => { S.matMetric = b.dataset.mm; root.querySelectorAll('[data-mm]').forEach(x => x.classList.toggle('on', x === b)); drawMatrix(i); });
+    $('cv-scmin').onchange = e => { S.scMin = Math.max(1, Math.floor(+e.target.value) || 1); drawScatter(); };
+    drawMatrix(i);
+    drawScatter();
+    const fill = comp => { if (tok !== cptTok) return; $('cv-ctab').innerHTML = compactTableHTML(i, comp, exactOK); drawChain(i, comp, t); drawHist(comp, t);
+      const b = $('cv-exact'); if (b) b.onclick = () => { S.exactFor.add(ckey(c)); b.disabled = true; b.textContent = 'Computing…'; setTimeout(() => { if (tok === cptTok) drawCompact(); }, 30); }; };
+    const key = exactOK ? compKey(i) : compKey(i, 2000);
+    if (has(key)) fill(compOf(i, exactOK ? 0 : 2000));
+    else setTimeout(() => { if (tok === cptTok) fill(compOf(i, exactOK ? 0 : 2000)); }, 20);
+  }
+  function compactTableHTML(i, comp, exactOK) {
+    const c = clusters[i], pw = comp.pairwise, tr = comp.toRep || {};
+    const g = (a, k) => pw ? num(pw[a][k]) : '—';
+    const basic = [
+      ['Organisms', fmt(comp.organisms), ''],
+      ['Distinct exact genomes', fmt(comp.exactGenomes), ''],
+      ['Distinct rule (presence) patterns', fmt(comp.rulePatterns), 'genomes with the same set of rules, outputs ignored'],
+      ['Exact genomes per organism', num(comp.genomesPerOrganism, 3), '1 = every member has its own genome'],
+      ['Simpson diversity', num(comp.simpson, 3), 'probability that two different random members carry different exact genomes'],
+    ];
+    return `<table class="cv-tbl"><tbody>${basic.map(([k, v, d]) => `<tr><td class="l">${k}</td><td>${v}</td><td class="wrap">${d}</td></tr>`).join('')}</tbody></table>
+      <table class="cv-tbl" style="margin-top:10px"><thead><tr><th class="l">Distance (rules)</th><th>Pair mean</th><th>min</th><th>max</th><th>To rep. mean</th><th>max</th></tr></thead><tbody>
+        <tr><td class="l" title="Conditions where exactly one of the two genomes has a rule">presence <span class="note">(clustering metric)</span></td><td>${g('presence', 'mean')}</td><td>${g('presence', 'min')}</td><td>${g('presence', 'max')}</td><td>${num(tr.meanPresence)}</td><td>${num(tr.maxPresence)}</td></tr>
+        <tr><td class="l" title="Conditions where both have a rule but the outputs differ">output <span class="note">(new)</span></td><td>${g('output', 'mean')}</td><td>${g('output', 'min')}</td><td>${g('output', 'max')}</td><td>—</td><td>—</td></tr>
+        <tr><td class="l" title="presence + output = conditions whose character differs">fine</td><td>${g('fine', 'mean')}</td><td>${g('fine', 'min')}</td><td>${g('fine', 'max')}</td><td>${num(tr.meanFine)}</td><td>${num(tr.maxFine)}</td></tr>
+      </tbody></table>
+      <p class="note" style="margin:6px 0 0"><b>presence</b> = rules present in exactly one of the two genomes: this is the explorer's existing clustering distance, and clustering is unchanged (it uses only presence).
+        <b>output</b> = rules both genomes carry but with different output colours (invisible to clustering). <b>fine</b> = presence + output. Pair values are over all pairs of distinct members (organism-weighted; two members with the same genome are a pair at 0).
+        "To rep." is to the representative genome (${model.pats[c.rep].rules} rules).</p>
+      ${!pw ? '<p class="note">A single organism has no pairs.</p>' : ''}
+      ${comp.sampled ? `<p class="note warn">Pair values are from a stride sample of 2,000 of the ${fmt(comp.exactGenomes)} distinct genomes, so min/max are bounds from the sample (true max ≥ shown).
+        ${exactOK ? '' : `<button id="cv-exact" style="padding:2px 8px;margin-left:6px">Compute exact (${fmt(comp.exactGenomes)} genomes, a few seconds)</button>`}</p>` : ''}`;
+  }
+  function drawChain(i, comp, t) {
+    const c = clusters[i], el = $('cv-chain');
+    if (!comp.pairwise) { el.innerHTML = '<p class="note">Single organism: no pairs.</p>'; return; }
+    const D = comp.pairwise.presence.max, ci = chainInfo(D, t, method), far = c.far;
+    const top = Math.max(D, 2 * t, far, 1) * 1.08, W = 520, H = 58, L = 10, R = 10, x = v => L + v / top * (W - L - R);
+    const mark = (v, lab, col, y) => `<line x1="${x(v)}" x2="${x(v)}" y1="16" y2="34" stroke="${col}" stroke-width="2"/><text x="${x(v)}" y="${y}" text-anchor="middle">${lab}</text>`;
+    let s = `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Max pairwise distance against t">`;
+    s += `<rect x="${L}" y="22" width="${x(t) - L}" height="6" fill="${css('--accent')}" opacity=".35"/><rect x="${x(t)}" y="22" width="${Math.max(0, x(top) - x(t))}" height="6" fill="${css('--bar2')}" opacity=".5"/>`;
+    s += mark(t, 't = ' + t, css('--ink'), 12);
+    if (method !== 'cc') s += mark(2 * t, '2t = ' + 2 * t, css('--muted'), 12);
+    s += mark(far, 'to rep. ' + far, css('--muted'), 48);
+    s += `<circle cx="${x(D)}" cy="25" r="5" fill="${ci.chained ? css('--Y') : css('--accent')}"/><text x="${x(D)}" y="${D === far ? 58 : 48}" text-anchor="middle" style="fill:var(--ink)">max pair ${D}</text></svg>`;
+    const txt = method === 'cc'
+      ? (ci.chained
+        ? `<b class="cv-flag">Chained.</b> The furthest pair of members differs in ${D} rules, more than t = ${t}. Connected components links genomes ≤ t apart and lets the links chain, so these members are in one cluster only through intermediate genomes.`
+        : `<b>Not chained beyond t.</b> Every pair of members is within t = ${t} (max pairwise ${D}).`)
+      : `Representative method: every member is within t = ${t} of the representative (furthest ${far}), so no pair can be more than 2t = ${2 * t} apart; the observed max pair is ${D}${2 * t ? ` (${pct(D / (2 * t))} of the bound)` : ''}.` +
+        (ci.chained ? ` Pairs above t mean members resemble the representative more than they resemble each other.` : '');
+    el.innerHTML = s + `<p class="note" style="margin:4px 0 0">${txt}${comp.sampled ? ' (max from the sample: a lower bound.)' : ''}</p>`;
+  }
+  function drawHist(comp, t) {
+    const el = $('cv-hist');
+    if (!comp.pairwise) { el.innerHTML = '<p class="note">No pairs.</p>'; return; }
+    const h = comp.pairwise.presenceHistogram, W = 520, H = 170, L = 40, B = 24, T = 8, tot = comp.pairwise.weight || 1;
+    const n = h.length, bw = (W - L - 8) / Math.max(n, 1), mx = Math.max(...h) / tot || 1;
+    let within = 0; for (let d = 0; d <= Math.min(t, n - 1); d++) within += h[d];
+    let s = `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Pairwise presence distance histogram">`;
+    h.forEach((v, d) => { if (!v) return; const f = v / tot, y = T + (1 - f / mx) * (H - T - B);
+      s += `<rect x="${L + d * bw + .5}" y="${y}" width="${Math.max(1, bw - 1)}" height="${H - B - y}" fill="${d <= t ? css('--accent') : css('--bar2')}"><title>${d} rules apart: ${pct(f)} of member pairs</title></rect>`; });
+    const step = n > 40 ? 10 : n > 15 ? 5 : 1;
+    for (let d = 0; d < n; d += step) s += `<text x="${L + d * bw + bw / 2}" y="${H - 8}" text-anchor="middle">${d}</text>`;
+    if (t < n) s += `<line x1="${L + (t + 1) * bw}" x2="${L + (t + 1) * bw}" y1="${T}" y2="${H - B}" stroke="${css('--ink')}" stroke-dasharray="3 3"/>`;
+    s += `<text x="${L - 6}" y="${T + 10}" text-anchor="end">${pct(mx)}</text><text x="${L - 6}" y="${H - B}" text-anchor="end">0</text></svg>`;
+    el.innerHTML = s + `<p class="note" style="margin:2px 0 0">${pct(within / tot)} of member pairs are within t = ${t} (blue); dashed line = t. ${comp.sampled ? 'From a sample of distinct genomes (see the table).' : ''}</p>`;
+  }
+  function drawScatter() {
+    const host = $('cv-scatter'); if (!host) return;
+    const tok = ++scTok, idx = scatterCandidates(clusters, S.scMin, 80), prog = document.querySelector('#tab-compact .cv-prog');
+    const pending = idx.filter(i => !has(compKey(i, 2000)));
+    const step = () => {
+      if (tok !== scTok || activeTab !== 'compact') return;
+      const t0 = performance.now();
+      while (pending.length && performance.now() - t0 < 40) compOf(pending.shift(), 2000);
+      if (pending.length) { if (prog) prog.textContent = `computing ${idx.length - pending.length} of ${idx.length} clusters…`; setTimeout(step, 0); }
+      else { if (prog) prog.textContent = ''; renderScatter(host, idx); }
+    };
+    if (pending.length) setTimeout(step, 30); else step();
+  }
+  function renderScatter(host, idx) {
+    const t = tNow(), pts = idx.map(i => ({i, n: clusters[i].organisms, comp: compOf(i, 2000)})).filter(p => p.comp.pairwise);
+    if (!pts.length) { host.innerHTML = `<p class="note">No cluster with at least ${S.scMin} organisms has two or more members.</p>`; return; }
+    const W = 640, H = 270, L = 46, R = 14, T = 12, B = 36;
+    let lo = Math.log10(Math.min(...pts.map(p => p.n))), hi = Math.log10(Math.max(...pts.map(p => p.n)));
+    if (hi - lo < 0.5) { lo -= 0.25; hi += 0.25; }
+    const ymax = Math.max(t, ...pts.map(p => p.comp.pairwise.presence.mean)) * 1.1 || 1;
+    const X = n => L + (Math.log10(n) - lo) / (hi - lo) * (W - L - R), Y = v => T + (1 - v / ymax) * (H - T - B);
+    let s = `<svg class="cv-scatter" viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Cluster size against mean pairwise distance">`;
+    for (let p = Math.ceil(lo); p <= Math.floor(hi); p++) s += `<line x1="${X(10 ** p)}" x2="${X(10 ** p)}" y1="${T}" y2="${H - B}" stroke="${css('--line')}"/><text x="${X(10 ** p)}" y="${H - B + 14}" text-anchor="middle">${fmt(10 ** p)}</text>`;
+    const ys = ymax > 20 ? 10 : ymax > 8 ? 2 : ymax > 3 ? 1 : 0.5;
+    for (let v = 0; v <= ymax; v += ys) s += `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="${css('--line')}"/><text x="${L - 6}" y="${Y(v) + 4}" text-anchor="end">${v}</text>`;
+    s += `<line x1="${L}" x2="${W - R}" y1="${Y(t)}" y2="${Y(t)}" stroke="${css('--ink')}" stroke-dasharray="3 3"/><text x="${W - R}" y="${Y(t) - 4}" text-anchor="end">t = ${t}</text>`;
+    s += `<text x="${(L + W - R) / 2}" y="${H - 4}" text-anchor="middle">organisms in cluster (log scale)</text><text x="12" y="${(T + H - B) / 2}" transform="rotate(-90 12 ${(T + H - B) / 2})" text-anchor="middle">mean pairwise presence distance</text>`;
+    for (const p of pts.slice().reverse()) {
+      const pw = p.comp.pairwise, ch = pw.presence.max > t, sel = p.i === selected;
+      s += `<circle data-i="${p.i}" cx="${X(p.n)}" cy="${Y(pw.presence.mean)}" r="${sel ? 7 : 4.5}" fill="${ch ? css('--Y') : css('--accent')}" fill-opacity="${ch ? .35 : .75}"
+        stroke="${sel ? css('--ink') : ch ? css('--Y') : css('--accent')}" stroke-width="${sel || ch ? 2 : 1}"${p.comp.sampled ? ' stroke-dasharray="2 1.5"' : ''}/>`;
+    }
+    host.innerHTML = s + `</svg><div class="cv-lg" style="margin-top:2px">
+      <span><span class="sw" style="background:${css('--accent')}"></span>max pairwise ≤ t</span>
+      <span><span class="sw" style="background:transparent;border:2px solid ${css('--Y')}"></span>max pairwise &gt; t (${method === 'cc' ? 'chained' : 'within the 2t bound'})</span>
+      <span>dashed outline = sampled (2,000 distinct genomes)</span><span>dark ring = selected; click a point to select its cluster</span>
+      <span>${pts.length} clusters shown (${fmt(pts.reduce((a, p) => a + p.n, 0))} organisms)</span></div>`;
+    host.querySelectorAll('circle[data-i]').forEach(el => {
+      const i = +el.dataset.i, comp = compOf(i, 2000), pw = comp.pairwise;
+      el.onmousemove = e => tip(e, `<strong>Cluster ${cname(i)}</strong>: ${fmt(clusters[i].organisms)} organisms, ${fmt(comp.exactGenomes)} distinct genomes<br>mean pairwise presence ${num(pw.presence.mean)}, max ${pw.presence.max}${pw.presence.max > t ? ' &gt; t' : ''}<br>mean pairwise fine ${num(pw.fine.mean)}${comp.sampled ? '<br><i>sampled: 2,000 distinct genomes</i>' : ''}`);
+      el.onmouseleave = hideTip;
+      el.onclick = () => { hideTip(); selected = i; drawTable(); drawGenome(); };
+    });
+  }
+  function drawMatrix(i) {
+    const host = $('cv-mat'), c = clusters[i], key = ckey(c);
+    const M = cget('mat|' + key, () => { const te = topEntries(clusterEntries(i), 120, repGenome(i)); return {te, D: GA.distanceMatrix(te.list, run.colours)}; });
+    const n = M.D.n, te = M.te;
+    $('cv-matnote').textContent = `${n} of ${fmt(te.distinct)} distinct genomes, carrying ${fmt(te.organismsShown)} of ${fmt(te.organisms)} organisms. Ordered greedily by nearest neighbour from the representative (top-left).`;
+    if (n < 2) { host.innerHTML = '<p class="note">Only one distinct genome: nothing to compare.</p>'; return; }
+    const D = M.D[S.matMetric], order = cget('mord|' + S.matMetric + '|' + key, () => nnOrder(n, D, te.repIdx));
+    let mx = 0; for (const v of D) if (v > mx) mx = v;
+    const cell = Math.max(2, Math.min(8, Math.floor(480 / n))), size = cell * n;
+    host.innerHTML = `<canvas class="cv-canvas" width="${size}" height="${size}" style="width:${Math.min(480, Math.max(size, 240))}px"></canvas>
+      <div class="cv-lg">${S.matMetric} distance: 0<span class="cv-grad" style="background:linear-gradient(to right, var(--panel), var(--accent))"></span>${mx} rules · hover for the pair</div>`;
+    const cv = host.querySelector('canvas'), g = cv.getContext('2d'), a = hexRGB(css('--panel')), b = hexRGB(css('--accent'));
+    for (let r = 0; r < n; r++) for (let q = 0; q < n; q++) {
+      const f = mx ? D[order[r] * n + order[q]] / mx : 0;
+      g.fillStyle = `rgb(${a.map((v, k) => Math.round(v + (b[k] - v) * f)).join(',')})`;
+      g.fillRect(q * cell, r * cell, cell, cell);
+    }
+    cv.onmousemove = e => {
+      const k = cv.width / cv.clientWidth, q = Math.floor(e.offsetX * k / cell), r = Math.floor(e.offsetY * k / cell);
+      if (q < 0 || r < 0 || q >= n || r >= n) return hideTip();
+      const A = order[r], B = order[q], ea = te.list[A], eb = te.list[B];
+      tip(e, `row: genome carried by ${fmt(ea.count)}${A === te.repIdx ? ' (representative)' : ''}<br>col: genome carried by ${fmt(eb.count)}${B === te.repIdx ? ' (representative)' : ''}<br>presence ${M.D.presence[A * n + B]} · output ${M.D.output[A * n + B]} · fine ${M.D.fine[A * n + B]}`);
+    };
+    cv.onmouseleave = hideTip;
+  }
+
+  // ============================================================== tab: compare clusters
+  function cmpChosen() {
+    if (S.cmpClusters !== clusters) { S.cmpClusters = clusters; S.cmpCustom = false; }
+    if (!S.cmpCustom) S.cmpSel = clusters.length > 1 ? [selected, selected + 1 < clusters.length ? selected + 1 : selected - 1] : [selected];
+    S.cmpSel = [...new Set(S.cmpSel.filter(i => i >= 0 && i < clusters.length))].slice(0, 6);
+    if (!S.cmpSel.includes(S.cmpA)) S.cmpA = S.cmpSel[0];
+    if (!S.cmpSel.includes(S.cmpB) || S.cmpB === S.cmpA) S.cmpB = S.cmpSel.find(i => i !== S.cmpA);
+    return S.cmpSel;
+  }
+  const pairOf = (a, b) => cget('cmp|' + ckey(clusters[a]) + '|' + ckey(clusters[b]), () => GA.compareConservation(consOf(a), consOf(b)));
+  function drawCompare() {
+    const root = $('tab-compare'), chosen = cmpChosen();
+    const list = [...new Set([...Array(Math.min(30, clusters.length)).keys(), ...chosen])].sort((a, b) => a - b);
+    const full = chosen.length >= 6;
+    let h = `<div class="cv-bar"><span class="lbl">Choose 2–6 clusters (${chosen.length} chosen)</span>
+        <button id="cv-addsel"${chosen.includes(selected) || full ? ' disabled' : ''}>Add selected cluster (${cname(selected)})</button>
+        <button id="cv-cmpreset" title="Selected cluster + the next one by size">Reset</button></div>
+      <div class="cv-check">${list.map(i => { const on = chosen.includes(i);
+        return `<label class="${!on && full ? 'off' : ''}"><input type="checkbox" data-ci="${i}"${on ? ' checked' : ''}${!on && full ? ' disabled' : ''}>${sw(i)}${cname(i)} · ${fmt(clusters[i].organisms)} <span class="note">(${pct(clusters[i].share)})</span></label>`; }).join('')}</div>`;
+    if (chosen.length < 2) { root.innerHTML = h + '<p class="note">Choose at least two clusters to compare.</p>'; wireCompare(root); return; }
+    const cons = new Map(chosen.map(i => [i, consOf(i)]));
+    // similarity matrix
+    const metrics = [['prevSim', 'Prevalence similarity', 'Over conditions either cluster carries: 1 − mean |prevalence A − prevalence B|. 1 = identical presence profiles.'],
+      ['jac50', 'Jaccard ≥50%', 'Rules carried by ≥50% of each cluster: shared / (in either). Presence only.'],
+      ['repP', 'Rep. presence dist.', 'Presence distance between the two representative genomes (clustering metric).'],
+      ['repF', 'Rep. fine dist.', 'Fine distance (presence + output) between the representative genomes.']];
+    const ps = (a, b) => { const [x, y] = a < b ? [a, b] : [b, a]; return cget('ps|' + ckey(clusters[x]) + '|' + ckey(clusters[y]), () => pairSummary(pairOf(x, y), repGenome(x), repGenome(y))); };
+    const isDist = S.cmpMetric === 'repP' || S.cmpMetric === 'repF';
+    let dmax = 1; if (isDist) for (const a of chosen) for (const b of chosen) if (a !== b) dmax = Math.max(dmax, ps(a, b)[S.cmpMetric]);
+    const mcell = (a, b) => { if (a === b) return `<td class="note">${isDist ? 0 : '1'}</td>`;
+      const v = ps(a, b)[S.cmpMetric]; if (v == null) return '<td>—</td>';
+      const f = isDist ? v / dmax : v;
+      return `<td style="${mixBg('var(--accent)', 70 * f).replace('var(--empty)', 'var(--panel)')}">${isDist ? v : v.toFixed(3)}</td>`; };
+    h += `<h3 class="cv-h3">Similarity matrix</h3>
+      <div class="cv-bar" style="margin-top:0">${segHTML('cm', metrics.map(([v, l, d]) => [v, l, d]), S.cmpMetric)}</div>
+      <table class="cv-tbl cv-mx" style="width:auto"><thead><tr><th></th>${chosen.map(i => `<th>${sw(i)}${cname(i)}</th>`).join('')}</tr></thead><tbody>
+      ${chosen.map(a => `<tr><td class="l">${sw(a)}${cname(a)}</td>${chosen.map(b => mcell(a, b)).join('')}</tr>`).join('')}</tbody></table>
+      <p class="note" style="margin:4px 0 0">${esc(metrics.find(m => m[0] === S.cmpMetric)[2])}</p>`;
+    // metrics table
+    const comps = new Map(chosen.map(i => [i, has(compKey(i)) ? compOf(i) : compOf(i, 2000)]));   // exact if already computed
+    const mrow = (k, f, d) => `<tr><td class="l"${d ? ` title="${esc(d)}"` : ''}>${k}</td>${chosen.map(i => `<td>${f(i)}</td>`).join('')}</tr>`;
+    const pwv = (i, a, k) => { const c = comps.get(i); return c.pairwise ? (c.sampled ? '≈' : '') + num(c.pairwise[a][k]) : '—'; };
+    h += `<h3 class="cv-h3">Side by side</h3><div class="tablewrap" style="max-height:none"><table class="cv-tbl" style="width:auto;min-width:50%"><thead><tr><th class="l">Measure</th>${chosen.map(i => `<th>${sw(i)}${cname(i)}</th>`).join('')}</tr></thead><tbody>
+      ${mrow('Organisms', i => fmt(clusters[i].organisms))}
+      ${mrow('Share of population', i => pct(clusters[i].share))}
+      ${mrow('Distinct exact genomes', i => fmt(clusters[i].exact))}
+      ${mrow('Mean pairwise presence', i => pwv(i, 'presence', 'mean'), 'Organism-weighted mean presence distance between members (≈ = from a 2,000-genome sample)')}
+      ${mrow('Max pairwise presence', i => pwv(i, 'presence', 'max'), 'Largest presence distance between two members (≈ = sample; a lower bound)')}
+      ${mrow('Mean pairwise output', i => pwv(i, 'output', 'mean'), 'Rules both carry with different outputs')}
+      ${mrow('Rules in representative', i => fmt(model.pats[clusters[i].rep].rules))}
+      ${mrow('Rules in 100%', i => fmt(cons.get(i).summary.atLeast[100]))}
+      ${mrow('Rules in ≥75%', i => fmt(cons.get(i).summary.atLeast[75]))}
+      ${mrow('Rules in ≥50%', i => fmt(cons.get(i).summary.atLeast[50]))}
+      ${mrow('Present in any member', i => fmt(cons.get(i).summary.presentAny))}
+      ${mrow('Unanimous output (of present)', i => fmt(cons.get(i).summary.unanimous), 'Present conditions where all carriers share one output')}
+      ${mrow('Unanimous among ≥50% rules', i => fmt(cons.get(i).summary.unanimousAt[50]))}
+      ${mrow('Fully conserved', i => fmt(cons.get(i).summary.fullyConserved), 'In 100% of members with a unanimous output')}
+      ${mrow('Presence agreement', i => pc(cons.get(i).summary.presenceAgreement))}
+      ${mrow('Output agreement', i => pc(cons.get(i).summary.outputAgreement))}
+      </tbody></table></div>`;
+    // pair focus
+    const A = S.cmpA, B = S.cmpB, cmp = pairOf(A, B), cA = cons.get(A), cB = cons.get(B);
+    const opt = (cur) => chosen.map(i => `<option value="${i}"${i === cur ? ' selected' : ''}>${cname(i)} (${fmt(clusters[i].organisms)})</option>`).join('');
+    const L = [[1, '100%'], [0.75, '≥75%'], [0.5, '≥50%'], [0.25, '≥25%']];
+    h += `<h3 class="cv-h3">Pair focus</h3>
+      <div class="cv-bar" style="margin-top:0"><label style="flex-direction:row;align-items:center;gap:6px">A <select id="cv-pa">${opt(A)}</select></label>
+        <label style="flex-direction:row;align-items:center;gap:6px">B <select id="cv-pb">${opt(B)}</select></label>
+        <span class="note">prevalence similarity ${num(cmp.prevalenceSimilarity, 3)}</span></div>
+      <table class="cv-tbl" style="width:auto"><thead><tr><th class="l">Rules carried by</th><th>Shared</th><th title="Shared and the same majority output">same output</th><th title="Shared but a different majority output">diff. output</th><th title="Shared, but the majority output is tied in A or B, so neither same nor different">tied</th><th>Only A</th><th>Only B</th><th title="shared / (shared + only A + only B)">Jaccard</th></tr></thead><tbody>
+      ${L.map(([l, lab]) => { const s = cmp.sets[l]; let diff = 0;
+        for (const r of cmp.rows) if (r.prevA >= l - 1e-12 && r.prevB >= l - 1e-12 && r.outputDiffers) diff++;
+        const tied = s.shared - s.sharedSameOutput - diff;
+        return `<tr><td class="l">${lab} of each cluster</td><td>${s.shared}</td><td>${s.sharedSameOutput}</td><td${diff ? ' class="cv-flag"' : ''}>${diff}</td><td>${tied}</td><td>${s.onlyA}</td><td>${s.onlyB}</td><td>${num(s.jaccard, 3)}</td></tr>`; }).join('')}
+      </tbody></table>
+      <div class="cv-trio" style="margin-top:10px">
+        <div><div class="note">A = ${sw(A)}${cname(A)} (${fmt(cA.N)} organisms): colour = majority output, strength = prevalence level, notch = outputs differ</div>${heatHTML(x => consCell(cA.rows[x], {mode: 'prev'}), 'cv-small cv-pA')}</div>
+        <div><div class="note">B = ${sw(B)}${cname(B)} (${fmt(cB.N)} organisms)</div>${heatHTML(x => consCell(cB.rows[x], {mode: 'prev'}), 'cv-small cv-pB')}</div>
+        <div><div class="note">Difference: prevalence A − B. <span class="sw" style="background:var(--accent)"></span>more in A · <span class="sw" style="background:var(--M)"></span>more in B · strength = |difference| · notch = both carry it but majority outputs differ · outlined = absent from both</div>
+          ${heatHTML(x => { const r = cmp.rows[x], abs = !cA.rows[x].carriers && !cB.rows[x].carriers;
+            return `<div class="cell${abs ? ' cv-abs' : ''}${r.outputDiffers ? ' cv-dis' : ''}" style="${abs ? '' : mixBg(r.dPrev >= 0 ? 'var(--accent)' : 'var(--M)', 100 * Math.abs(r.dPrev))}" data-x="${x}"></div>`; }, 'cv-small cv-pD')}</div>
+      </div>
+      <h3 class="cv-h3">Top distinguishing conditions (${fmt(cmp.distinguishing.length)} differ; top 30)</h3>
+      <div class="tablewrap" style="max-height:360px"><table class="cv-tbl"><thead><tr><th class="l">Condition</th><th class="l" title="presence = prevalence gap is the larger difference; output = both carry it and outputs diverge (TV × smaller prevalence)">Kind</th><th>Prev. A</th><th>Prev. B</th><th>A − B</th><th>Maj. out A</th><th>Maj. out B</th><th title="Total variation distance between the two output distributions among carriers (0 same, 1 disjoint)">Output TV</th><th>Score</th></tr></thead><tbody>
+      ${cmp.distinguishing.slice(0, 30).map(r => `<tr><td class="l">${esc(ruleText(r.x))}</td><td class="l">${r.kind}</td><td>${pct(r.prevA)}</td><td>${pct(r.prevB)}</td><td>${Math.abs(r.dPrev) < 5e-4 ? '0.0' : (r.dPrev > 0 ? '+' : '') + (100 * r.dPrev).toFixed(1)}</td>
+        <td>${r.topA >= 0 ? SYM[r.topA] : '–'}</td><td${r.outputDiffers ? ' class="cv-flag"' : ''}>${r.topB >= 0 ? SYM[r.topB] : '–'}</td><td>${r.tv == null ? '—' : r.tv.toFixed(2)}</td><td>${r.score.toFixed(3)}</td></tr>`).join('') || '<tr><td colspan="9" class="note l">The two clusters have identical conservation profiles.</td></tr>'}
+      </tbody></table></div>`;
+    root.innerHTML = h;
+    wireCompare(root);
+    const pairTip = x => { const a = cA.rows[x], b = cB.rows[x], r = cmp.rows[x];
+      const side = (nm, q) => `${nm}: ${fmt(q.carriers)} carriers (${pct(q.prevalence)})${q.carriers ? ', outputs ' + q.outs.map((v, k) => `${SYM[k]} ${pct(v / q.carriers)}`).join(' ') : ''}`;
+      return `<strong>${esc(ruleText(x))}</strong> <span class="note">cond. ${x}</span><br>${side('A ' + cname(A), a)}<br>${side('B ' + cname(B), b)}<br>prevalence A − B: ${(100 * r.dPrev).toFixed(1)} pts${r.tv != null ? ` · output TV ${r.tv.toFixed(2)}` : ''}`; };
+    root.querySelectorAll('.cv-pA, .cv-pB, .cv-pD').forEach(el => wireGrid(el, pairTip));
+    root.querySelectorAll('[data-cm]').forEach(b => b.onclick = () => { S.cmpMetric = b.dataset.cm; drawCompare(); });
+    $('cv-pa').onchange = e => { S.cmpA = +e.target.value; if (S.cmpB === S.cmpA) S.cmpB = chosen.find(i => i !== S.cmpA); drawCompare(); };
+    $('cv-pb').onchange = e => { S.cmpB = +e.target.value; if (S.cmpB === S.cmpA) S.cmpA = chosen.find(i => i !== S.cmpB); drawCompare(); };
+  }
+  function wireCompare(root) {
+    root.querySelectorAll('[data-ci]').forEach(cb => cb.onchange = () => {
+      const i = +cb.dataset.ci;
+      S.cmpSel = cb.checked ? [...S.cmpSel, i].slice(0, 6) : S.cmpSel.filter(v => v !== i);
+      S.cmpCustom = true; drawCompare();
+    });
+    $('cv-addsel').onclick = () => { if (!S.cmpSel.includes(selected) && S.cmpSel.length < 6) { S.cmpSel = [...S.cmpSel, selected]; S.cmpCustom = true; drawCompare(); } };
+    $('cv-cmpreset').onclick = () => { S.cmpCustom = false; drawCompare(); };
+  }
+
+  onViews('cons', drawCons);
+  onViews('compact', drawCompact);
+  onViews('compare', drawCompare);
+  return Object.assign({S, cache}, pure);
+})();
+</script>
+
+<!-- ===== view-lineage / view-runs (tabs lineage, runs) ===== -->
+<style id="style-lineage">
+.lin-ctl { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: flex-end; margin: 10px 0; }
+.lin-ctl input[type=number] { width: 5.5em; }
+.lin-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin: 8px 0 14px; }
+.lin-tiles .tile .d { color: var(--muted); font-size: 11px; line-height: 1.35; margin-top: 4px; }
+.lin-tiles .tile .s { color: var(--muted); font-size: 12px; }
+.lin-two { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); margin: 12px 0; }
+@media (max-width: 900px) { .lin-two { grid-template-columns: minmax(0, 1fr); } }
+.lin-box h3 { font-size: 13px; margin: 14px 0 6px; font-weight: 650; }
+.lin-cv { display: block; max-width: 100%; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
+.lin-msg { border: 1px dashed var(--line); border-radius: 8px; padding: 12px 14px; color: var(--muted); }
+.lin-msg b, .lin-msg strong { color: var(--ink); }
+.lin-prog { height: 4px; background: var(--empty); border-radius: 2px; overflow: hidden; margin: 6px 0; }
+.lin-prog div { height: 100%; background: var(--accent); width: 0; }
+.lin-table td.grp { background: var(--bg); font-weight: 650; text-align: left; }
+.lin-table tbody tr { cursor: default; }
+.lin-pill { display: inline-block; padding: 0 6px; border-radius: 9px; font-size: 11px; background: var(--accent-soft); color: var(--accent); margin-left: 4px; }
+</style>
+<script id="view-lineage">
+'use strict';
+// Two analysis tabs: 'lineage' (genome similarity vs ancestry within the selected cluster) and 'runs'
+// (several runs / ticks side by side, plus rebuilding earlier ticks from a .hxlg family tree).
+(() => {
+  // ------------------------------------------------------------------ shared helpers
+  const hexRgb = v => { const s = css(v); const m = /^#([0-9a-f]{6})$/i.exec(s); if (m) return [0, 2, 4].map(k => parseInt(m[1].slice(k, k + 2), 16)); const m3 = /^#([0-9a-f]{3})$/i.exec(s); return m3 ? [0, 1, 2].map(k => 17 * parseInt(m3[1][k], 16)) : [128, 128, 128]; };
+  const mixRgb = (a, b, f) => `rgb(${a.map((v, k) => Math.round(v + (b[k] - v) * f)).join(',')})`;
+  const num = (x, d = 2) => x == null || Number.isNaN(x) ? '—' : (+x).toFixed(d);
+  const pctN = x => x == null ? '—' : pct(x);
+  const hideTip = () => { $('tip').style.display = 'none'; };
+  const founderColour = rank => rank < 10 ? `hsl(${(rank * 67 + 30) % 360} 60% 50%)` : css('--bar2');
+  function setupCanvas(cv, w, h) {
+    const r = window.devicePixelRatio || 1;
+    cv.width = Math.round(w * r); cv.height = Math.round(h * r); cv.style.width = w + 'px'; cv.style.height = h + 'px';
+    const ctx = cv.getContext('2d'); ctx.setTransform(r, 0, 0, r, 0, 0); return ctx;
+  }
+  const strideSample = (arr, k) => arr.length <= k ? arr.slice() : Array.from({length: k}, (_, i) => arr[Math.floor(i * arr.length / k)]);
+  const tickLabel = c => `tick ${fmt(c.tick)}${c.final ? ' (final)' : ''}${c.reconstructed ? ' (rebuilt)' : ''}`;
+
+  // ================================================================== tab 'lineage'
+  const LIN = {cap: 300, closeD: 2, farGen: 40, nearGen: 4, farD: 8, lower: 'tree', treeX: 'lin', matrixCap: 150, treeCap: 150,
+    cache: new WeakMap(), treeOpen: new WeakSet()};
+  function linRelations(c) {
+    let m = LIN.cache.get(c); if (!m) LIN.cache.set(c, m = new Map());
+    const key = [LIN.cap, LIN.closeD, LIN.farGen, LIN.nearGen, LIN.farD].join();
+    if (!m.has(key)) {
+      const t0 = performance.now();
+      const r = GA.lineageRelations(cp.lineage, GA.entriesFromPatterns(model.pats, c.mem), run.colours,
+        {maxOrganisms: LIN.cap, closeDistance: LIN.closeD, farGenerations: LIN.farGen, nearGenerations: LIN.nearGen, farDistance: LIN.farD});
+      r.ms = performance.now() - t0;
+      m.set(key, r);
+    }
+    return m.get(key);
+  }
+  // id -> genome string for the cluster's organisms (only .hxlg entries carry ids)
+  function linGenomeOf(c) {
+    if (c._linG) return c._linG;
+    const g = new Map();
+    for (const i of c.mem) for (const e of model.pats[i].exact) if (e[2]) for (const id of e[2]) g.set(id, e[0]);
+    return c._linG = g;
+  }
+
+  function linMissing() {
+    return `<div class="lin-msg"><p><strong>No family tree in this checkpoint, so genome similarity cannot be compared with ancestry.</strong></p>
+      <p>Relations need, for every organism in the cluster, its <b>organism id</b> and, for every organism in its line of descent,
+      its <b>parent id</b>, <b>founder id</b> and <b>birth tick</b> (death tick too, to rebuild earlier ticks). The simulator's
+      <b>Export lineage + genomes</b> button writes exactly this as a <code>.hxlg</code> file: open one of those instead.</p>
+      <p><code>genome-clusters.json</code> (from <code>analysis/genome-clusters.js</code>) holds only genomes and counts per checkpoint.
+      To support it, the pipeline would need (1) the organism ids of each exact genome (<code>exact: [genome, count, ids]</code>) and
+      (2) the parent / founder / birth columns for those ids and all their ancestors. The run directories' genome snapshots record
+      genomes only, so the simulator would also have to log ids with each snapshot. No relations are guessed here.</p></div>`;
+  }
+
+  function drawLineage() {
+    const el = $('tab-lineage');
+    if (!cp.lineage) { el.innerHTML = linMissing(); return; }
+    const c = clusters[selected], L = cp.lineage;
+    const ctl = `<div class="lin-ctl">
+      <label>Sample cap <input type="number" id="lin_cap" min="20" max="1500" step="10" value="${LIN.cap}"></label>
+      <label>"Close" = presence ≤ <input type="number" id="lin_closeD" min="0" max="60" value="${LIN.closeD}"></label>
+      <label>"Distant kin" = tree dist. ≥ <input type="number" id="lin_farGen" min="1" max="100000" value="${LIN.farGen}"></label>
+      <label>"Near kin" = tree dist. ≤ <input type="number" id="lin_nearGen" min="1" max="1000" value="${LIN.nearGen}"></label>
+      <label>"Far genome" = presence ≥ <input type="number" id="lin_farD" min="1" max="200" value="${LIN.farD}"></label>
+      <span class="note" id="lin_time"></span></div>`;
+    if (c.organisms < 2) { el.innerHTML = ctl + '<p class="lin-msg">This cluster holds a single organism, so there are no pairs to relate. Pick a larger cluster in the table above.</p>'; linWireCtl(); return; }
+    const r = linRelations(c);
+    if (!r.available) { el.innerHTML = ctl + `<p class="lin-msg">${esc(r.reason)}</p>`; linWireCtl(); return; }
+    const tile = (v, k, s, d) => `<div class="tile"><div class="v">${v}</div><div class="k">${k}</div>${s ? `<div class="s">${s}</div>` : ''}<div class="d">${d}</div></div>`;
+    const P = r.pairs, M = r.clusterMRCA;
+    const tiles = [
+      tile(fmt(r.organisms), 'Organisms', r.sampled ? `pairs use an even sample of ${fmt(r.considered)}` : `all ${fmt(r.considered)} used for pairs`,
+        `Cluster members found in the lineage log${r.missing ? ` (${fmt(r.missing)} ids missing)` : ''}. Pair statistics below use ${r.sampled ? 'a fixed-stride sample' : 'every member'} (${fmt(P)} pairs).`),
+      tile(fmt(r.founders.length), 'Founders represented', `largest: #${r.founders[0].founder} with ${pct(r.founders[0].share)}`,
+        'Distinct starting organisms (no parent) that all members descend from; share = members descending from the most common one.'),
+      tile(M ? `${fmt(M.ageTicks)} ticks` : 'none', 'Cluster MRCA age', M ? `#${M.id}, up to ${fmt(M.maxGenerations)} generations back` : 'members come from different founders',
+        `Most recent common ancestor of all members: ticks from its birth to tick ${fmt(L.tick)}; generations = longest member-to-MRCA path.`),
+      tile(pctN(r.sameFounderShare), 'Pairs with the same founder', `${fmt(r.sameFounder)} of ${fmt(P)}`,
+        'Share of sampled organism pairs that descend from the same founder (so have any common ancestor at all).'),
+      tile(fmt(r.parentChild), 'Parent–child pairs', P ? pct(r.parentChild / P) + ' of pairs' : '',
+        'Pairs where one organism is the other\'s parent (tree distance 1), both alive at this tick.'),
+      tile(fmt(r.siblings), 'Sibling pairs', P ? pct(r.siblings / P) + ' of pairs' : '',
+        'Pairs with the same parent (each is 1 generation below the MRCA).'),
+      tile(fmt(r.identicalGenomePairs), 'Identical-genome pairs', P ? pct(r.identicalGenomePairs / P) + ' of pairs' : '',
+        'Pairs carrying exactly the same genome string (presence and outputs).'),
+      tile(num(r.spearmanPresenceVsTree), 'Spearman: presence vs tree distance', '',
+        'Rank correlation, over same-founder pairs, between presence distance (rules one has, the other lacks) and tree distance (generations A→MRCA→B). 1 = genome distance orders pairs exactly by kinship.'),
+      tile(num(r.spearmanPresenceVsAge), 'Spearman: presence vs MRCA age', '',
+        'Same, against ticks since the pair\'s MRCA was born. Positive = older splits have diverged further.'),
+      tile(pctN(r.nearestGenomeIsNearestRelative), 'Nearest genome is nearest relative', '',
+        'Share of sampled organisms for which a genetically nearest sample-mate (ties included) is also at the smallest tree distance among all sample-mates.'),
+    ];
+    // shared ancestor within g generations: bars
+    const within = r.sharedAncestorWithin, bw = 46, H = 120, Wb = within.length * bw + 40;
+    let bars = `<svg viewBox="0 0 ${Wb} ${H + 34}" width="100%" style="max-width:${Wb * 1.2}px" role="img" aria-label="Share of pairs sharing an ancestor within g generations">`;
+    within.forEach((w, k) => {
+      const h = (w.share || 0) * H, x = 30 + k * bw;
+      bars += `<rect x="${x + 4}" y="${10 + H - h}" width="${bw - 8}" height="${h}" fill="${css('--accent')}" rx="2"><title>MRCA within ${w.generations} generation(s) of both: ${fmt(w.pairs)} pairs (${pctN(w.share)})</title></rect>`;
+      bars += `<text x="${x + bw / 2}" y="${H + 24}" text-anchor="middle">≤${w.generations}</text><text x="${x + bw / 2}" y="${Math.max(18, 6 + H - h)}" text-anchor="middle">${w.share == null ? '' : Math.round(w.share * 100)}</text>`;
+    });
+    bars += `<text x="26" y="16" text-anchor="end">100%</text><text x="26" y="${10 + H}" text-anchor="end">0</text><text x="${Wb / 2}" y="${H + 34}" text-anchor="middle">generations from each member up to the pair's MRCA</text></svg>`;
+
+    el.innerHTML = ctl + `<div class="lin-tiles">${tiles.join('')}</div>
+      <div class="lin-two">
+        <div class="lin-box"><h3>Share of pairs sharing an ancestor within ≤ g generations (%)</h3>${bars}
+          <p class="note">A pair counts at g when its MRCA is at most g generations above <em>both</em> members (max(genA, genB) ≤ g). Different-founder pairs never count.</p></div>
+        <div class="lin-box"><h3>Presence distance vs tree distance (all sampled pairs)</h3><div id="lin_heat"></div>
+          <p class="note">x = presence distance; y = tree distance in generations (binned, closest kin at the top); bottom row = pairs from different founders. Shade = pair count (log).</p></div>
+      </div>
+      <h3>By presence distance</h3>
+      <div class="tablewrap" style="max-height:260px"><table class="lin-table"><thead><tr><th>Presence dist.</th><th>Pairs</th><th>% different founder</th><th>Median MRCA age (ticks)</th><th>Median tree dist. (gens)</th></tr></thead><tbody>
+      ${r.byPresenceDistance.map(b => `<tr><td>${b.presence}</td><td>${fmt(b.pairs)}</td><td>${pct(b.differentFounder / b.pairs)}</td><td>${b.medianAgeTicks == null ? '—' : fmt(Math.round(b.medianAgeTicks))}</td><td>${b.medianTreeDist == null ? '—' : fmt(b.medianTreeDist)}</td></tr>`).join('')}
+      </tbody></table></div>
+      <div class="lin-box"><h3>Distance matrix, organisms in family-tree order</h3>
+        <div class="row" style="margin-bottom:6px"><span class="note">Lower triangle:</span><span class="seg" id="lin_lower">
+          <button data-v="tree" class="${LIN.lower === 'tree' ? 'on' : ''}">tree distance</button><button data-v="age" class="${LIN.lower === 'age' ? 'on' : ''}">MRCA age</button><button data-v="presence" class="${LIN.lower === 'presence' ? 'on' : ''}">presence (symmetric)</button></span>
+          <span class="note" id="lin_mnote"></span></div>
+        <canvas id="lin_matrix" class="lin-cv"></canvas>
+        <p class="note">Upper triangle = presence distance (strong accent colour = similar, faint = distant). Lower = the chosen lineage measure (strong = close kin / recent MRCA, faint = distant); flat grey = different founders. The strip on the left and top colours each organism's founder. Hover a cell for details.</p></div>
+      <div class="lin-box"><h3>Family tree of these organisms</h3>
+        <div id="lin_treeWrap">${LIN.treeOpen.has(c) ? '' : `<button id="lin_treeBtn">Show family tree of these organisms</button> <span class="note">up to ${LIN.treeCap} members; straight runs of single descent are collapsed</span>`}</div></div>
+      <div class="lin-two">
+        <div class="lin-box"><h3>Genetically close but distantly related or unrelated <span class="lin-pill">${fmt(r.closeUnrelatedTotal)} pairs</span></h3>
+          <p class="note">Presence distance ≤ ${LIN.closeD} and (different founders or tree distance ≥ ${LIN.farGen} generations). Convergence or long-conserved genomes.</p>
+          ${linPairTable(r.closeUnrelated, r.closeUnrelatedTotal, true)}</div>
+        <div class="lin-box"><h3>Closely related but genetically distant <span class="lin-pill">${fmt(r.farRelatedTotal)} pairs</span></h3>
+          <p class="note">Tree distance ≤ ${LIN.nearGen} generations and presence distance ≥ ${LIN.farD}. Bursts of rule change within a few generations.</p>
+          ${linPairTable(r.farRelated, r.farRelatedTotal, false)}</div>
+      </div>
+      <p class="note">Whole-population views (Muller plot, sampled tree of everyone alive, clades) are in <code>lineage-explorer.html</code>: open the same <code>.hxlg</code> there. It has no way to receive a list of organisms, so this tab draws only the cluster's own sub-tree.</p>`;
+    $('lin_time').textContent = `computed in ${Math.round(r.ms)} ms`;
+    linWireCtl();
+    linHeat(r);
+    linMatrix(c, r);
+    $('lin_lower').querySelectorAll('button').forEach(b => b.onclick = () => { LIN.lower = b.dataset.v; drawLineage(); });
+    if (LIN.treeOpen.has(c)) linTree(c, r);
+    else $('lin_treeBtn').onclick = () => { LIN.treeOpen.add(c); $('lin_treeWrap').innerHTML = ''; linTree(c, r); };
+  }
+  function linWireCtl() {
+    for (const [id, k, lo] of [['lin_cap', 'cap', 20], ['lin_closeD', 'closeD', 0], ['lin_farGen', 'farGen', 1], ['lin_nearGen', 'nearGen', 1], ['lin_farD', 'farD', 1]])
+      $(id).onchange = e => { const v = Math.round(+e.target.value); if (Number.isFinite(v) && v >= lo) { LIN[k] = k === 'cap' ? Math.min(v, 1500) : v; drawLineage(); } };
+  }
+  function linPairTable(rows, total, close) {
+    if (!rows.length) return '<p class="note">None.</p>';
+    return `<div class="tablewrap" style="max-height:260px"><table class="lin-table"><thead><tr><th>Organisms</th><th>Presence</th><th>Fine</th><th>Tree dist.</th><th>MRCA age</th></tr></thead><tbody>
+      ${rows.map(p => `<tr><td>#${p.a} · #${p.b}</td><td>${p.presence}</td><td>${p.fine}</td><td>${p.treeDist == null ? '<span class="note">diff. founders</span>' : fmt(p.treeDist)}</td><td>${p.ageTicks == null ? '—' : fmt(p.ageTicks)}</td></tr>`).join('')}
+      </tbody></table></div>${total > rows.length ? `<p class="note">Showing the first ${rows.length} of ${fmt(total)} (sorted by ${close ? 'presence distance, then most distant kinship' : 'presence distance, largest first'}).</p>` : ''}`;
+  }
+  // 2-D histogram: presence distance (x) vs tree distance bins (y)
+  function linHeat(r) {
+    const n = r.considered, Pm = r.presenceMatrix, Tm = r.treeMatrix;
+    const bins = [[1, 1], [2, 2], [3, 4], [5, 8], [9, 16], [17, 32], [33, 64], [65, 128], [129, 256], [257, 512], [513, 1024], [1025, 1e9]];
+    const binOf = t => { for (let k = 0; k < bins.length; k++) if (t <= bins[k][1]) return k; return bins.length - 1; };
+    let maxP = 0; for (let i = 0; i < n * n; i++) if (Pm[i] > maxP) maxP = Pm[i];
+    const capP = Math.min(maxP, 40), counts = new Map(); let usedBins = 0, diff = false;
+    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+      const p = Math.min(Pm[i * n + j], capP), t = Tm[i * n + j], b = t < 0 ? -1 : binOf(t);
+      if (b < 0) diff = true; else usedBins = Math.max(usedBins, b + 1);
+      const k = p + ':' + b; counts.set(k, (counts.get(k) || 0) + 1);
+    }
+    const rows = [...bins.slice(0, usedBins).map((b, k) => [k, b[0] === b[1] ? `${b[0]}` : b[1] > 1e8 ? `>${b[0] - 1}` : `${b[0]}–${b[1]}`])];
+    if (diff) rows.push([-1, 'diff. founder']);
+    const cw = Math.max(8, Math.min(18, Math.floor(440 / (capP + 1)))), ch = 16, L0 = 78, T0 = 6, W = L0 + (capP + 1) * cw + 6, H = T0 + rows.length * ch + 30;
+    let maxC = 1; for (const v of counts.values()) maxC = Math.max(maxC, v);
+    const a = hexRgb('--empty'), b = hexRgb('--accent');
+    let s = `<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W * 1.3}px" role="img" aria-label="Presence distance against tree distance">`;
+    rows.forEach(([bk, lab], ri) => {
+      const y = T0 + ri * ch;   // closest kin at the top, different founders at the bottom
+      s += `<text x="${L0 - 4}" y="${y + ch - 4}" text-anchor="end">${lab}</text>`;
+      for (let p = 0; p <= capP; p++) {
+        const v = counts.get(p + ':' + bk) || 0, f = v ? 0.15 + 0.85 * Math.log(1 + v) / Math.log(1 + maxC) : 0;
+        s += `<rect x="${L0 + p * cw}" y="${y}" width="${cw - 1}" height="${ch - 1}" fill="${v ? mixRgb(a, b, f) : css('--empty')}"><title>presence ${p}${p === capP && capP < maxP ? '+' : ''}, tree ${lab}: ${fmt(v)} pairs</title></rect>`;
+      }
+    });
+    for (let p = 0; p <= capP; p += capP > 20 ? 5 : 2) s += `<text x="${L0 + p * cw + cw / 2}" y="${T0 + rows.length * ch + 12}" text-anchor="middle">${p}${p === capP && capP < maxP ? '+' : ''}</text>`;
+    s += `<text x="${L0 + (capP + 1) * cw / 2}" y="${H - 2}" text-anchor="middle">presence distance (rules)</text></svg>`;
+    $('lin_heat').innerHTML = s;
+  }
+  // Distance matrix in lineage order; upper = presence, lower = tree distance / MRCA age / presence.
+  function linMatrix(c, r) {
+    const L = cp.lineage, n = r.considered, used = r.organismsUsed, idx = new Map(used.map((id, i) => [id, i]));
+    const ids = GA.lineageOrder(L, strideSample(used, LIN.matrixCap)), m = ids.length, ix = ids.map(id => idx.get(id));
+    const cs = Math.max(2, Math.min(8, Math.floor(620 / m))), S = 8, size = S + 2 + m * cs;
+    const cv = $('lin_matrix'), ctx = setupCanvas(cv, size, size);
+    const fr = new Map(); r.founders.forEach((f, k) => fr.set(f.founder, k));
+    let maxP = 1, maxT = 1, maxA = 1;
+    for (let a = 0; a < m; a++) for (let b = 0; b < m; b++) if (a !== b) {
+      const i = ix[a], j = ix[b]; maxP = Math.max(maxP, r.presenceMatrix[i * n + j]);
+      const t = r.treeMatrix[i * n + j]; if (t > maxT) maxT = t;
+    }
+    const chains = ids.map(id => GA.chainOf(L, id)), rel = (a, b) => GA.pairRelation(L, chains[a], chains[b]);
+    const ages = new Float64Array(m * m).fill(-1);
+    if (LIN.lower === 'age') for (let a = 0; a < m; a++) for (let b = 0; b < a; b++) { const q = rel(a, b); if (q.sameFounder) { ages[a * m + b] = q.ageTicks; if (q.ageTicks > maxA) maxA = q.ageTicks; } }
+    const lo = hexRgb('--accent'), hi = hexRgb('--empty'), other = css('--bar2');
+    for (let a = 0; a < m; a++) {
+      ctx.fillStyle = founderColour(fr.get(L.founder[ids[a]]) ?? 99);
+      ctx.fillRect(0, S + 2 + a * cs, S, cs); ctx.fillRect(S + 2 + a * cs, 0, cs, S);
+      for (let b = 0; b < m; b++) {
+        if (a === b) { ctx.fillStyle = css('--ink'); ctx.fillRect(S + 2 + b * cs, S + 2 + a * cs, cs, cs); continue; }
+        const i = ix[a], j = ix[b];
+        let f, col = null;
+        if (b > a || LIN.lower === 'presence') f = r.presenceMatrix[i * n + j] / maxP;
+        else if (LIN.lower === 'tree') { const t = r.treeMatrix[i * n + j]; if (t < 0) col = other; else f = Math.log(t) / Math.log(Math.max(2, maxT)); }
+        else { const g = ages[a * m + b]; if (g < 0) col = other; else f = Math.log(1 + g) / Math.log(1 + maxA); }
+        ctx.fillStyle = col || mixRgb(lo, hi, Math.max(0, Math.min(1, f)));
+        ctx.fillRect(S + 2 + b * cs, S + 2 + a * cs, cs, cs);
+      }
+    }
+    $('lin_mnote').textContent = `${m} organisms${n > m ? ` (even sample of the ${fmt(n)} used above)` : ''}; presence 0–${maxP} rules${LIN.lower === 'tree' ? `, tree 1–${fmt(maxT)} generations (log)` : LIN.lower === 'age' ? `, MRCA age 0–${fmt(maxA)} ticks (log)` : ''}.`;
+    const gOf = linGenomeOf(c);
+    cv.onmousemove = e => {
+      const rc = cv.getBoundingClientRect(), x = e.clientX - rc.left - S - 2, y = e.clientY - rc.top - S - 2;
+      const a = Math.floor(y / cs), b = Math.floor(x / cs);
+      if (a < 0 || b < 0 || a >= m || b >= m) { hideTip(); return; }
+      const A = ids[a], B = ids[b];
+      if (a === b) { tip(e, `<strong>#${A}</strong><br>founder #${L.founder[A]}, born tick ${fmt(L.birth[A])}`); return; }
+      const d = GA.genomeDistance(gOf.get(A), gOf.get(B)), q = rel(a, b);
+      tip(e, `<strong>#${A} · #${B}</strong><br>presence ${d.presence}, output ${d.output}, fine ${d.fine}<br>` +
+        (q.sameFounder ? `tree distance ${fmt(q.treeDist)} (${q.genA} + ${q.genB} gens)<br>MRCA #${q.mrca}, born tick ${fmt(L.birth[q.mrca])} (${fmt(q.ageTicks)} ticks before)` : `different founders (#${L.founder[A]}, #${L.founder[B]})`));
+    };
+    cv.onmouseleave = hideTip;
+  }
+  // Focused family tree: x = birth tick, y = leaf order; straight runs collapsed by GA.compressedTree.
+  function linTree(c, r) {
+    const L = cp.lineage, wrap = $('lin_treeWrap'), all = r.organismsUsed;
+    const ids = strideSample(all, LIN.treeCap), nodes = GA.compressedTree(L, ids), gOf = linGenomeOf(c);
+    const repG = model.pats[c.rep].exact[0][0];
+    const kids = new Map(), byId = new Map(nodes.map(nd => [nd.id, nd]));
+    for (const nd of nodes) if (nd.parent >= 0) { let a = kids.get(nd.parent); if (!a) kids.set(nd.parent, a = []); a.push(nd); }
+    for (const a of kids.values()) a.sort((p, q) => p.birth - q.birth || p.id - q.id);
+    const roots = nodes.filter(nd => nd.parent < 0);
+    // y: leaves in depth-first order, internal nodes at the middle of their children (iterative post-order)
+    let leaf = 0;
+    for (const root of roots) {
+      const st = [[root, 0]];
+      while (st.length) {
+        const top = st[st.length - 1], ch = kids.get(top[0].id) || [];
+        if (top[1] < ch.length) { st.push([ch[top[1]++], 0]); continue; }
+        st.pop();
+        top[0].y = ch.length ? (ch[0].y + ch[ch.length - 1].y) / 2 : leaf++;
+      }
+      leaf += 0.6;   // gap between founders
+    }
+    const nonRoot = nodes.filter(nd => nd.parent >= 0), tEnd = L.tick;
+    // founders sit at the left margin; the time axis starts at the earliest kept non-founder node
+    let tMin = tEnd; for (const nd of nonRoot) if (nd.birth < tMin) tMin = nd.birth;
+    tMin = Math.max(0, tMin - Math.max(5, Math.round((tEnd - tMin) * 0.02)));
+    const Wd = Math.max(520, Math.min(980, wrap.clientWidth || 900)), rowH = Math.max(5, Math.min(14, Math.floor(820 / Math.max(1, leaf)))), Lm = 120, Rm = 20, Tm = 18;
+    const H = Tm + Math.ceil(leaf) * rowH + 30;
+    const logX = LIN.treeX === 'log', span0 = Math.max(1, tEnd - tMin);
+    const X = t => Lm + (logX ? 1 - Math.log1p(Math.max(0, tEnd - Math.max(t, tMin))) / Math.log1p(span0) : (Math.max(t, tMin) - tMin) / span0) * (Wd - Lm - Rm), Y = y => Tm + y * rowH + rowH / 2;
+    const dists = new Map(); let maxD = 1;
+    for (const nd of nodes) if (nd.member && gOf.has(nd.id)) { const d = GA.genomeDistance(gOf.get(nd.id), repG).presence; dists.set(nd.id, d); maxD = Math.max(maxD, d); }
+    wrap.innerHTML = `<p class="note">${fmt(ids.length)} of the cluster's ${fmt(r.organisms)} organisms${all.length > ids.length || r.organisms > all.length ? ` (an even sample; ${fmt(r.organisms - ids.length)} omitted)` : ''}; ${fmt(nodes.length - ids.length)} branch points and founders kept, every other ancestor collapsed into its edge (label = generations along it).
+      Members are coloured by presence distance to the cluster representative (accent blue = identical, red = ${maxD} rules); hollow grey dots are ancestors.${roots.length > 1 ? ` ${roots.length} founders: each starts its own tree at the left edge.` : ''}</p>
+      <div class="row" style="margin-bottom:6px"><span class="note">Time axis:</span><span class="seg" id="lin_treeX"><button data-v="lin" class="${logX ? '' : 'on'}">birth tick</button><button data-v="log" class="${logX ? 'on' : ''}">ticks before this checkpoint (log)</button></span></div>
+      <canvas id="lin_tree" class="lin-cv"></canvas>`;
+    $('lin_treeX').querySelectorAll('button').forEach(b => b.onclick = () => { LIN.treeX = b.dataset.v; linTree(c, r); });
+    const cv = $('lin_tree'), ctx = setupCanvas(cv, Wd, H), ink = css('--ink'), mut = css('--muted'), line = css('--line');
+    const lo = hexRgb('--accent'), hi = hexRgb('--R');
+    ctx.font = '11px system-ui, sans-serif'; ctx.textBaseline = 'middle';
+    // time axis
+    ctx.fillStyle = mut; ctx.strokeStyle = line; ctx.lineWidth = 1;
+    const span = tEnd - tMin, step = 10 ** Math.floor(Math.log10(Math.max(1, span / 5))) * ([1, 2, 5].find(k => span / (10 ** Math.floor(Math.log10(Math.max(1, span / 5))) * k) <= 8) || 10);
+    const ticks = logX ? [0, 1, 3, 10, 30, 100, 300, 1000, 3000, 10000, 30000, 100000].filter(v => v <= span0).map(v => tEnd - v)
+      : (() => { const o = []; for (let t = Math.ceil(tMin / step) * step; t <= tEnd; t += step) o.push(t); return o; })();
+    for (const t of ticks) { const x = X(t); ctx.beginPath(); ctx.moveTo(x, Tm - 6); ctx.lineTo(x, H - 26); ctx.stroke(); ctx.textAlign = 'center'; ctx.fillText(logX ? fmt(tEnd - t) : fmt(t), x, H - 16); }
+    ctx.textAlign = 'center'; ctx.fillText(logX ? `born this many ticks before this checkpoint (tick ${fmt(tEnd)}), log scale` : `birth tick (this checkpoint: ${fmt(tEnd)})`, (Lm + Wd - Rm) / 2, H - 4);
+    // edges
+    ctx.strokeStyle = mut; ctx.lineWidth = 1;
+    for (const nd of nodes) {
+      if (nd.parent < 0) continue;
+      const p = byId.get(nd.parent), xp = p.parent < 0 ? Lm - 30 : X(p.birth), xc = X(nd.birth), yp = Y(p.y), yc = Y(nd.y);
+      ctx.beginPath(); ctx.moveTo(xp, yp); ctx.lineTo(xp, yc); ctx.lineTo(xc, yc); ctx.stroke();
+      if (nd.gens > 1 && xc - xp > 34) { ctx.fillStyle = mut; ctx.textAlign = 'left'; ctx.fillText(`${fmt(nd.gens)}g`, xp + 3, yc - 6); }
+    }
+    // nodes
+    const pts = [];
+    for (const nd of nodes) {
+      const x = nd.parent < 0 ? Lm - 30 : X(nd.birth), y = Y(nd.y); pts.push([x, y, nd]);
+      if (nd.member) { const d = dists.get(nd.id) ?? 0; ctx.fillStyle = mixRgb(lo, hi, d / maxD); ctx.beginPath(); ctx.arc(x, y, Math.max(2.5, rowH * 0.35), 0, 7); ctx.fill(); }
+      else { ctx.strokeStyle = mut; ctx.beginPath(); ctx.arc(x, y, 2.5, 0, 7); ctx.stroke(); }
+      if (nd.parent < 0) { ctx.fillStyle = ink; ctx.textAlign = 'right'; ctx.fillText(`founder #${nd.id}`, x - 6, y); }
+    }
+    cv.onmousemove = e => {
+      const rc = cv.getBoundingClientRect(), mx = e.clientX - rc.left, my = e.clientY - rc.top;
+      let best = null, bd = 64;
+      for (const [x, y, nd] of pts) { const d = (x - mx) ** 2 + (y - my) ** 2; if (d < bd) { bd = d; best = nd; } }
+      if (!best) { hideTip(); return; }
+      const p = best.parent >= 0 ? byId.get(best.parent) : null;
+      tip(e, `<strong>#${best.id}</strong> ${best.member ? '(cluster member)' : best.parent < 0 ? '(founder)' : '(ancestor: lines split here)'}<br>born tick ${fmt(best.birth)}, ${best.death < 0 || best.death >= tEnd ? 'alive at this tick' : 'died tick ' + fmt(best.death)}<br>founder #${best.founder}` +
+        (p ? `<br>${fmt(best.gens)} generation(s) below #${p.id}` : '') + (dists.has(best.id) ? `<br>presence distance to representative: ${dists.get(best.id)}` : '') +
+        ((kids.get(best.id) || []).length > 1 ? `<br>MRCA of ${kids.get(best.id).length} branches` : ''));
+    };
+    cv.onmouseleave = hideTip;
+  }
+  onViews('lineage', drawLineage);
+
+  // ================================================================== tab 'runs'
+  const RUNS = {prof: new WeakMap(), cc: new WeakMap(), job: 0, a: null, b: null, pa: null, pb: null, every: 5000, T: null};
+  const uids = new WeakMap(); let uidNext = 1;   // stable keys: checkpoint indices shift when rebuilt ticks are inserted
+  const uidOf = c => { let u = uids.get(c); if (!u) uids.set(c, u = 'c' + uidNext++); return u; };
+  const allCps = () => DATA.runs.flatMap((r, ri) => r.checkpoints.map((c, k) => ({r, ri, c, k, key: uidOf(c)})));
+  const findKey = key => allCps().find(x => x.key === key) || null;
+  // Per-checkpoint model and population profile (cached on the checkpoint object)
+  function runsProfile(c, r) {
+    let p = RUNS.prof.get(c);
+    if (!p) {
+      const m = c === cp ? model : buildModel(c);
+      const prof = GA.populationProfile(m.pats, r.conditions.length, r.colours);
+      let w4 = 0; for (const [d, v] of Object.entries(c.nearestNeighbour || {})) if (+d <= 4) w4 += v;
+      p = {model: m, prof, within4: c.survivors ? w4 / c.survivors : null};
+      RUNS.prof.set(c, p);
+    }
+    return p;
+  }
+  function runsClustersOf(c, r, t, meth) {   // same clustering as the main panel, for any checkpoint
+    let m = RUNS.cc.get(c); if (!m) RUNS.cc.set(c, m = new Map());
+    const key = meth + ':' + t;
+    if (!m.has(key)) {
+      const mod = runsProfile(c, r).model, lab = meth === 'cc' ? labelsCC(mod, t) : labelsRep(mod, t), g = new Map();
+      lab.forEach((l, i) => { let a = g.get(l); if (!a) g.set(l, a = []); a.push(i); });
+      const cl = [...g.values()].map(mem => { let n = 0; for (const i of mem) n += mod.pats[i].count; return {mem, organisms: n, share: n / mod.total}; }).sort((a, b) => b.organisms - a.organisms);
+      m.set(key, cl);
+    }
+    return m.get(key);
+  }
+  // Check that birth/death replay reproduces the export, once per file.
+  function runsHxlgCheck(r) {
+    if (r._hxlgCheck) return r._hxlgCheck;
+    const d = r._hxlg, h = d.header, L = {birth: d.birth, death: d.death};
+    const live = h.liveAtExport.filter(id => id >= 0 && id < h.organisms), set = new Set(live);
+    // An export labelled T is taken before tick T's births and deaths, which is GA.aliveAt's convention;
+    // aliveT is the other convention (after tick T), only used to explain a mismatch.
+    const alive = GA.aliveAt(L, h.exportedAtTick), aliveT = GA.aliveAt(L, h.exportedAtTick + 1);
+    const same = x => x.length === set.size && x.every(id => set.has(id));
+    let firstBirth = Infinity; for (let i = 0; i < d.birth.length; i++) if (d.birth[i] < firstBirth) firstBirth = d.birth[i];
+    return r._hxlgCheck = {ok: same(alive), okAtT: same(aliveT), rebuilt: alive.length, live: live.length,
+      unrecorded: h.liveAtExport.length - live.length, firstBirth, exportTick: h.exportedAtTick};
+  }
+  function runsReconstruct(r, T) {
+    const d = r._hxlg, h = d.header;
+    if (r.checkpoints.some(c => c.tick === T)) return null;
+    const ids = GA.aliveAt({birth: d.birth, death: d.death}, T);   // state at the start of tick T, like an export at T
+    const genomes = genomesFromHxlg(d, ids);
+    if (!genomes.length) throw new Error(`No recorded organism was alive at tick ${T}.`);
+    const pats = groupPatterns(genomes), total = pats.reduce((s, p) => s + p.count, 0), edges = spanningTree(pats);
+    const c = {tick: T, final: false, reconstructed: true, phase: '', survivors: total, uniqueGenomes: genomes.length, uniquePatterns: pats.length,
+      nearestNeighbour: nearestHistogram(pats, edges), mergeCurve: mergeCurve(pats, edges, total), mst: edges, patterns: pats.map(p => p.exact),
+      lineage: {parent: d.parent, founder: d.founder, birth: d.birth, death: d.death, tick: T}};
+    let at = r.checkpoints.findIndex(x => x.tick > T); if (at < 0) at = r.checkpoints.length;
+    r.checkpoints.splice(at, 0, c);
+    if (r === run) {   // refresh the checkpoint picker, keeping the current checkpoint
+      $('cp').innerHTML = run.checkpoints.map((x, k) => `<option value="${k}">tick ${fmt(x.tick)}${x.final ? ' (final)' : ''}${x.reconstructed ? ' (rebuilt from lineage)' : ''}${x.phase ? ' · ' + esc(x.phase) : ''}</option>`).join('');
+      $('cp').value = run.checkpoints.indexOf(cp);
+    }
+    return c;
+  }
+
+  function drawRuns() {
+    const el = $('tab-runs'), t = +$('t').value, list = allCps();
+    const hx = run._hxlg ? runsHxlgCheck(run) : null;
+    const opt = (sel) => list.map(x => `<option value="${x.key}"${x.key === sel ? ' selected' : ''}>${esc(x.r.name)} · ${tickLabel(x.c)}</option>`).join('');
+    if (!findKey(RUNS.a) || !findKey(RUNS.b) || RUNS.a === RUNS.b) { RUNS.a = list[0].key; RUNS.b = list[list.length - 1].key; }
+    if (!findKey(RUNS.pa) || !findKey(RUNS.pb) || RUNS.pa === RUNS.pb || RUNS.prun !== run) {   // default persistence pair: the current run's first and last checkpoint
+      RUNS.prun = run; RUNS.pa = uidOf(run.checkpoints[0]); RUNS.pb = uidOf(run.checkpoints[run.checkpoints.length - 1]);
+    }
+    let rebuild = '';
+    if (run._hxlg) {
+      const lo = hx.firstBirth + 1, hi = hx.exportTick;
+      if (RUNS.T == null) RUNS.T = Math.round(hi / 2);
+      rebuild = hx.ok ? `<div class="lin-ctl">
+          <label>Add checkpoint at tick <input type="number" id="runs_T" min="${lo}" max="${hi}" value="${RUNS.T}"></label><button id="runs_addT">Add</button>
+          <label>or every <input type="number" id="runs_every" min="1" value="${RUNS.every}"> ticks</label><button id="runs_addEvery">Add (≤ 12)</button>
+          <span class="note" id="runs_rbStatus"></span></div>
+        <p class="note">Check passed: replaying birth and death ticks reproduces the ${fmt(hx.live)} organisms alive at export (tick ${fmt(hx.exportTick)}). A rebuilt checkpoint at tick T holds the organisms born before T and not dead before T (the export convention); its lineage ages are measured from T.
+          Organisms born while lineage logging was off have no record and cannot be rebuilt${hx.unrecorded ? ` (${fmt(hx.unrecorded)} such organisms were alive at export)` : ' (none were alive at export, but earlier gaps would go unnoticed)'}. Phase labels are not rebuilt.</p>`
+        : `<p class="warn">Rebuilding is disabled: replaying birth/death ticks gives ${fmt(hx.rebuilt)} organisms alive at export, but the file lists ${fmt(hx.live)} recorded organisms alive then${hx.okAtT ? ' (it matches only when organisms born at the export tick are counted, an unexpected convention)' : ''}. Earlier ticks would not be trustworthy.</p>`;
+    } else rebuild = '<p class="note">Rebuilding earlier ticks needs a <code>.hxlg</code> run (the family tree holds every organism\'s birth and death tick). The current run came from JSON.</p>';
+    el.innerHTML = `
+      <div class="lin-ctl"><label>Add file… <input type="file" id="runs_file" accept=".hxlg,.json,application/json,application/octet-stream"></label>
+        <span class="note" id="runs_fileStatus">Adds the file's runs to the run picker; the current run and checkpoint stay selected.</span></div>
+      <h3 style="font-size:13px;margin:12px 0 4px">Rebuild earlier ticks of “${esc(run.name)}” from its family tree</h3>${rebuild}
+      <h3 style="font-size:13px;margin:16px 0 4px">Every loaded checkpoint <span class="note">· connected clusters at t = ${t}</span></h3>
+      <div class="lin-prog" id="runs_prog"><div></div></div>
+      <div class="tablewrap" style="max-height:420px"><table class="lin-table"><thead><tr><th>Checkpoint</th><th>Survivors</th><th>Unique genomes</th><th>Unique rule patterns</th><th>Mean rules</th><th>Another genome ≤ 4</th>
+        <th>Clusters (t=${t})</th><th>Largest</th><th>Rules in 100%</th><th>≥ 75%</th><th>≥ 50%</th><th>Outputs ${SYM.slice(0, run.colours).split('').join(' / ')}</th></tr></thead><tbody id="runs_rows"></tbody></table></div>
+      <p class="note">Rules in X% = conditions where at least X% of the whole population carries a rule. Outputs = share of all carried rules by output colour. Colours are not relabelled between runs.</p>
+      <div class="lin-two">
+        <div class="lin-box"><h3>Clusters vs threshold (connected)</h3><div id="runs_mc1"></div></div>
+        <div class="lin-box"><h3>Largest cluster's share vs threshold</h3><div id="runs_mc2"></div></div>
+      </div>
+      <div class="lin-box"><h3>Conditions by population prevalence (deciles; count on a log scale)</h3><div id="runs_prev"></div>
+        <p class="note">For each checkpoint: how many of the conditions carried by anyone are carried by 0–10%, 10–20%, … of organisms. Mass on the right = a conserved shared core.</p></div>
+      <div id="runs_legend" class="legend"></div>
+      <h3 style="font-size:13px;margin:16px 0 4px">Compare two checkpoints (population level)</h3>
+      <div class="lin-ctl"><label>A <select id="runs_a">${opt(RUNS.a)}</select></label><label>B <select id="runs_b">${opt(RUNS.b)}</select></label></div>
+      <div id="runs_cmp"></div>
+      <h3 style="font-size:13px;margin:16px 0 4px">Cluster persistence between two ticks of one run <span class="note">· t = ${t}, ${method === 'cc' ? 'connected' : 'representative'}</span></h3>
+      <div class="lin-ctl"><label>Earlier <select id="runs_pa">${opt(RUNS.pa)}</select></label><label>Later <select id="runs_pb">${opt(RUNS.pb)}</select></label></div>
+      <div id="runs_pers"></div>`;
+    $('runs_file').onchange = e => {
+      const f = e.target.files[0]; if (!f) return;
+      $('runs_fileStatus').textContent = `Reading ${f.name}…`;
+      f.arrayBuffer().then(buf => loadBuffer(buf, f.name, true)).then(() => { drawRuns(); $('runs_fileStatus').textContent = `Added ${f.name}: pick it in the Run menu above.`; })
+        .catch(err => { $('runs_fileStatus').textContent = 'Could not add: ' + err.message; });
+    };
+    if (run._hxlg && hx.ok) {
+      const go = async ticks => {
+        const st = $('runs_rbStatus'), lo = hx.firstBirth + 1, hi = hx.exportTick;
+        ticks = [...new Set(ticks.map(Math.round))].filter(T => T >= lo && T <= hi && !run.checkpoints.some(c => c.tick === T)).slice(0, 12);
+        if (!ticks.length) { st.textContent = `Nothing to add (ticks must be ${fmt(lo)}–${fmt(hi)} and not already loaded).`; return; }
+        for (let k = 0; k < ticks.length; k++) {
+          st.textContent = `Rebuilding tick ${fmt(ticks[k])} (${k + 1} of ${ticks.length})…`;
+          await new Promise(res => setTimeout(res, 20));
+          const t0 = performance.now();
+          try { const c = runsReconstruct(run, ticks[k]); st.textContent = c ? `Tick ${fmt(ticks[k])}: ${fmt(c.survivors)} organisms in ${Math.round(performance.now() - t0)} ms.` : ''; }
+          catch (err) { st.textContent = err.message; return; }
+        }
+        RUNS.pa = uidOf(run.checkpoints[0]); RUNS.pb = uidOf(run.checkpoints[run.checkpoints.length - 1]);
+        drawRuns();
+        $('runs_rbStatus').textContent = `Added ${ticks.length} checkpoint(s); pick them in the Checkpoint menu above.`;
+      };
+      $('runs_addT').onclick = () => { RUNS.T = +$('runs_T').value; go([RUNS.T]); };
+      $('runs_addEvery').onclick = () => {
+        const N = Math.max(1, Math.round(+$('runs_every').value)); RUNS.every = N;
+        const out = []; for (let T = Math.ceil((hx.firstBirth + 1) / N) * N; T < hx.exportTick && out.length < 12; T += N) if (T > hx.firstBirth) out.push(T);
+        go(out);
+      };
+    }
+    for (const id of ['runs_a', 'runs_b']) $(id).onchange = () => { RUNS.a = $('runs_a').value; RUNS.b = $('runs_b').value; runsCompare(); };
+    for (const id of ['runs_pa', 'runs_pb']) $(id).onchange = () => { RUNS.pa = $('runs_pa').value; RUNS.pb = $('runs_pb').value; runsPersistence(t); };
+    runsTable(list, t);
+  }
+  // Table rows computed one checkpoint at a time so big files show progress and the page stays responsive.
+  function runsTable(list, t) {
+    const job = ++RUNS.job, body = $('runs_rows');
+    let lastRun = -1, html = '';
+    const rowOf = (x, p, cl) => {
+      const pr = p.prof, cs = pr.conservation.summary;
+      return `<tr><td>${tickLabel(x.c)}${x.c === cp ? ' <span class="lin-pill">current</span>' : ''}</td><td>${fmt(pr.survivors)}</td><td>${fmt(pr.uniqueGenomes)}</td><td>${fmt(pr.uniquePatterns)}</td>
+        <td>${num(pr.meanRules, 1)}</td><td>${pctN(p.within4)}</td><td>${fmt(cl.length)}</td><td>${cl.length ? pct(cl[0].share) : '—'}</td>
+        <td>${cs.atLeast[100]}</td><td>${cs.atLeast[75]}</td><td>${cs.atLeast[50]}</td><td>${pr.outputShare.map(v => Math.round(v * 100)).join(' / ')}</td></tr>`;
+    };
+    let i = 0;
+    const step = () => {
+      if (job !== RUNS.job || !document.body.contains(body)) return;
+      const t0 = performance.now();
+      while (i < list.length && performance.now() - t0 < 40) {
+        const x = list[i++];
+        if (x.ri !== lastRun) { lastRun = x.ri; html += `<tr><td class="grp" colspan="12">${esc(x.r.name)}${x.r.seed != null ? ` (seed ${esc(x.r.seed)})` : ''} · ${x.r.colours} colours${x.r._hxlg ? ' · .hxlg' : ''}</td></tr>`; }
+        html += rowOf(x, runsProfile(x.c, x.r), runsClustersOf(x.c, x.r, t, 'cc'));
+      }
+      body.innerHTML = html;
+      $('runs_prog').firstElementChild.style.width = (100 * i / list.length) + '%';
+      if (i < list.length) setTimeout(step, 0);
+      else { $('runs_prog').style.visibility = 'hidden'; runsCharts(list); runsCompare(); runsPersistence(t); }
+    };
+    step();
+  }
+  function runsCharts(list) {
+    const W = 520, H = 200, L0 = 44, R0 = 12, T0 = 8, B0 = 26, colour = k => `hsl(${(k * 71 + 210) % 360} 60% 50%)`;
+    const maxT = Math.min(60, Math.max(1, ...list.map(x => x.c.mergeCurve.length ? x.c.mergeCurve[x.c.mergeCurve.length - 1].t : 1)));
+    const maxC = Math.max(2, ...list.map(x => x.c.uniquePatterns));
+    const X = v => L0 + v / maxT * (W - L0 - R0), Yc = v => T0 + (1 - Math.log10(Math.max(1, v)) / Math.log10(maxC)) * (H - T0 - B0), Ys = v => T0 + (1 - v) * (H - T0 - B0);
+    const axis = (yl) => { let s = ''; for (let v = 0; v <= maxT; v += maxT > 30 ? 10 : 5) s += `<text x="${X(v)}" y="${H - 8}" text-anchor="middle">${v}</text>`; return s + yl + `<text x="${(L0 + W - R0) / 2}" y="${H}" text-anchor="middle">threshold t</text>`; };
+    let s1 = `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Clusters versus threshold, every checkpoint">`, s2 = `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Largest share versus threshold, every checkpoint">`;
+    for (let p = 0; p <= Math.log10(maxC); p++) s1 += `<line x1="${L0}" x2="${W - R0}" y1="${Yc(10 ** p)}" y2="${Yc(10 ** p)}" stroke="${css('--line')}"/><text x="${L0 - 6}" y="${Yc(10 ** p) + 4}" text-anchor="end">${fmt(10 ** p)}</text>`;
+    for (const v of [0, .5, 1]) s2 += `<line x1="${L0}" x2="${W - R0}" y1="${Ys(v)}" y2="${Ys(v)}" stroke="${css('--line')}"/><text x="${L0 - 6}" y="${Ys(v) + 4}" text-anchor="end">${v * 100}%</text>`;
+    list.forEach((x, k) => {
+      const pts = x.c.mergeCurve.filter(q => q.t <= maxT), w = x.c === cp ? 2.6 : 1.4, nm = `${esc(x.r.name)} · ${tickLabel(x.c)}`;
+      s1 += `<polyline fill="none" stroke="${colour(k)}" stroke-width="${w}" points="${pts.map(q => X(q.t) + ',' + Yc(q.clusters)).join(' ')}"><title>${nm}</title></polyline>`;
+      s2 += `<polyline fill="none" stroke="${colour(k)}" stroke-width="${w}" points="${pts.map(q => X(q.t) + ',' + Ys(q.largestShare)).join(' ')}"><title>${nm}</title></polyline>`;
+    });
+    $('runs_mc1').innerHTML = s1 + axis('') + '</svg>'; $('runs_mc2').innerHTML = s2 + axis('') + '</svg>';
+    // prevalence deciles: one line per checkpoint
+    const Wp = 620, Hp = 190, Lp = 40;
+    const maxV = Math.max(1, ...list.map(x => Math.max(...runsProfile(x.c, x.r).prof.prevalenceHistogram)));
+    const Xp = k => Lp + (k + 0.5) / 10 * (Wp - Lp - 10), Yp = v => T0 + (1 - Math.log1p(v) / Math.log1p(maxV)) * (Hp - T0 - B0);   // log scale: the rare-rule bin dwarfs the rest
+    let s3 = `<svg viewBox="0 0 ${Wp} ${Hp}" width="100%" style="max-width:${Wp}px" role="img" aria-label="Conditions by prevalence decile, every checkpoint">`;
+    for (let k = 0; k < 10; k++) s3 += `<text x="${Xp(k)}" y="${Hp - 8}" text-anchor="middle">${k * 10}–${k * 10 + 10}%</text>`;
+    for (const v of [0, 1, 10, 100, 1000].filter(v => v <= maxV).concat(maxV)) s3 += `<text x="${Lp - 6}" y="${Yp(v) + 4}" text-anchor="end">${v}</text><line x1="${Lp}" x2="${Wp - 10}" y1="${Yp(v)}" y2="${Yp(v)}" stroke="${css('--line')}"/>`;
+    list.forEach((x, k) => {
+      const h = runsProfile(x.c, x.r).prof.prevalenceHistogram, nm = `${esc(x.r.name)} · ${tickLabel(x.c)}`;
+      s3 += `<polyline fill="none" stroke="${colour(k)}" stroke-width="${x.c === cp ? 2.6 : 1.4}" points="${h.map((v, i) => Xp(i) + ',' + Yp(v)).join(' ')}"><title>${nm}</title></polyline>`;
+      h.forEach((v, i) => s3 += `<circle cx="${Xp(i)}" cy="${Yp(v)}" r="2.2" fill="${colour(k)}"><title>${nm}: ${v} conditions carried by ${i * 10}–${i * 10 + 10}%</title></circle>`);
+    });
+    $('runs_prev').innerHTML = s3 + `<text x="${(Lp + Wp) / 2}" y="${Hp}" text-anchor="middle">share of organisms carrying the rule</text></svg>`;
+    $('runs_legend').innerHTML = list.map((x, k) => `<span><span class="sw" style="background:${colour(k)}"></span>${esc(x.r.name)} · ${tickLabel(x.c)}</span>`).join('');
+  }
+  function runsCompare() {
+    const A = findKey(RUNS.a), B = findKey(RUNS.b), out = $('runs_cmp');
+    if (!A || !B || !out) return;
+    if (A.key === B.key) { out.innerHTML = '<p class="note">Pick two different checkpoints.</p>'; return; }
+    const ok = GA.compatible(A.r, B.r);
+    if (!ok.ok) { out.innerHTML = `<p class="lin-msg">Not comparable condition by condition: ${esc(ok.reason)}. The two runs' genomes index different rule tables.</p>`; return; }
+    const pa = runsProfile(A.c, A.r).prof, pb = runsProfile(B.c, B.r).prof, cmp = GA.compareConservation(pa.conservation, pb.conservation);
+    const rt = x => { const [s0, ...cnt] = A.r.conditions[x], nb = cnt.map((v, k) => v ? v + SYM[k] : '').filter(Boolean), e = 6 - cnt.reduce((p, q) => p + q, 0); if (e) nb.push(e + ' empty'); return `${SYM[s0]} with ${nb.join(' ')}`; };
+    const sets = [[1, '100%'], [0.75, '≥ 75%'], [0.5, '≥ 50%']];
+    out.innerHTML = `${A.r !== B.r ? `<p class="note">Different runs: colours are <b>not</b> relabelled, so R in A is compared with R in B. Independent runs can settle on permuted colour roles, which makes this literal comparison conservative (analysis/colours.js relabels offline).</p>` : ''}
+      <div class="lin-two"><div><table class="lin-table"><thead><tr><th>Carried by</th><th>Shared</th><th>…same top output</th><th>Only A</th><th>Only B</th><th>Jaccard</th></tr></thead><tbody>
+        ${sets.map(([k, lab]) => { const s = cmp.sets[k]; return `<tr><td>${lab} of the population</td><td>${s.shared}</td><td>${s.sharedSameOutput}</td><td>${s.onlyA}</td><td>${s.onlyB}</td><td>${num(s.jaccard)}</td></tr>`; }).join('')}
+        </tbody></table>
+        <p class="note">Prevalence similarity = 1 − mean |prevalence A − prevalence B| over conditions carried in either: <b>${num(cmp.prevalenceSimilarity, 3)}</b>.</p></div>
+      <div><div class="tablewrap" style="max-height:260px"><table class="lin-table"><thead><tr><th>Most distinguishing condition</th><th>Prev. A</th><th>Prev. B</th><th>Top out A / B</th><th>Kind</th></tr></thead><tbody>
+        ${cmp.distinguishing.slice(0, 15).map(q => `<tr><td>${esc(rt(q.x))}</td><td>${pct(q.prevA)}</td><td>${pct(q.prevB)}</td><td>${q.topA >= 0 ? SYM[q.topA] : '—'} / ${q.topB >= 0 ? SYM[q.topB] : '—'}</td><td>${q.kind}</td></tr>`).join('')}
+        </tbody></table></div><p class="note">Score = larger of the prevalence gap and the output divergence (weighted by the smaller prevalence).</p></div></div>`;
+  }
+  // Cluster persistence: match by rule structure (Jaccard of rules carried by ≥ 50%) and, when both checkpoints come
+  // from the same .hxlg family tree, by descent (later members whose ancestors include earlier members).
+  function runsPersistence(t) {
+    const A = findKey(RUNS.pa), B = findKey(RUNS.pb), out = $('runs_pers');
+    if (!A || !B || !out) return;
+    if (A.r !== B.r) { out.innerHTML = '<p class="note">Pick two checkpoints of the same run.</p>'; return; }
+    if (A.c.tick >= B.c.tick) { out.innerHTML = '<p class="note">Pick an earlier and a later tick (Earlier must be before Later).</p>'; return; }
+    const r = A.r, nc = r.conditions.length, mA = runsProfile(A.c, r).model, mB = runsProfile(B.c, r).model;
+    const cA = runsClustersOf(A.c, r, t, method), cB = runsClustersOf(B.c, r, t, method);
+    const coreOf = (m, cl) => { if (cl._core) return cl._core; const car = new Float64Array(nc);
+      for (const i of cl.mem) for (const [g, k] of m.pats[i].exact) for (let x = 0; x < nc; x++) if (g[x] !== '.') car[x] += k;
+      const s = []; for (let x = 0; x < nc; x++) if (car[x] * 2 >= cl.organisms) s.push(x); return cl._core = new Set(s); };
+    const jac = (a, b) => { let i = 0; for (const x of a) if (b.has(x)) i++; const u = a.size + b.size - i; return u ? i / u : 1; };
+    const big = cA.filter(c => c.share >= 0.01).slice(0, 60);
+    const candB = cB.filter(c => c.share >= 0.01), candAll = !candB.length;   // tiny clusters' cores are just one genome: noisy matches
+    if (candAll) candB.push(...cB);
+    const descent = !!(A.c.lineage && B.c.lineage && A.c.lineage.parent === B.c.lineage.parent);
+    // descent: for each (sampled) later organism, every earlier-tick cluster that holds one of its ancestors (or itself)
+    let fromA = null, sampleNote = '';
+    if (descent) {
+      const L = B.c.lineage, idsOf = (m, cl) => { const o = []; for (const i of cl.mem) for (const e of m.pats[i].exact) if (e[2]) o.push(...e[2]); return o; };
+      const homeA = new Map(); let minBirth = Infinity;
+      cA.forEach((cl, k) => { for (const id of idsOf(mA, cl)) { homeA.set(id, k); if (L.birth[id] < minBirth) minBirth = L.birth[id]; } });
+      fromA = cB.map(cl => { const ids = idsOf(mB, cl), use = strideSample(ids, 400), cnt = new Map();
+        for (const id of use) {
+          const hit = new Set();
+          for (let a = id; a >= 0 && L.birth[a] >= minBirth; a = L.parent[a]) if (homeA.has(a)) hit.add(homeA.get(a));   // ancestors only get older
+          for (const k of hit) cnt.set(k, (cnt.get(k) || 0) + 1);
+        }
+        return {n: use.length, of: ids.length, cnt}; });
+      sampleNote = fromA.some(f => f.n < f.of) ? ' Later clusters above 400 organisms are checked on an even sample of 400.' : '';
+    }
+    const rows = big.map(ca => {
+      const kA = cA.indexOf(ca), core = coreOf(mA, ca);
+      let best = -1, bj = -1; for (const cb of candB) { const j = jac(core, coreOf(mB, cb)); if (j > bj) { bj = j; best = cB.indexOf(cb); } }
+      let desc = '', byDesc = '';
+      if (descent) {
+        const f = fromA[best]; desc = pct((f.cnt.get(kA) || 0) / f.n);
+        let bk = -1, bs = 0; fromA.forEach((g, k) => { const s = (g.cnt.get(kA) || 0) / g.n * cB[k].organisms; if (s > bs) { bs = s; bk = k; } });
+        byDesc = bk < 0 ? '<span class="note">no descendants</span>' : `${bk + 1} (${pct(cB[bk].share)}; ${pct((fromA[bk].cnt.get(kA) || 0) / fromA[bk].n)} of it)`;
+      }
+      return `<tr><td>${kA + 1}</td><td>${pct(ca.share)}</td><td>${core.size}</td><td>${best + 1}</td><td>${pct(cB[best].share)}</td><td>${num(bj)}</td>${descent ? `<td>${desc}</td><td>${byDesc}</td>` : ''}</tr>`;
+    });
+    out.innerHTML = `<div class="tablewrap" style="max-height:340px"><table class="lin-table"><thead><tr><th>Earlier cluster</th><th>Share</th><th>Core rules (≥ 50%)</th>
+      <th>Best later match by rules</th><th>Its share</th><th>Jaccard of cores</th>${descent ? '<th>…members descending from the earlier cluster</th><th>Later cluster with most of its descendants</th>' : ''}</tr></thead>
+      <tbody>${rows.join('') || `<tr><td colspan="8" class="note">No cluster holds ≥ 1% at tick ${fmt(A.c.tick)}.</td></tr>`}</tbody></table></div>
+      <p class="note"><b>By rule structure</b>: the later cluster whose core (rules carried by ≥ 50% of its members) has the highest Jaccard overlap with the earlier core, among later clusters holding ≥ 1%${candAll ? ' (none does at this t, so all later clusters are candidates)' : ''}; rows = clusters at tick ${fmt(A.c.tick)} holding ≥ 1%, same t and method as above.
+      ${descent ? `<b>By descent</b>: a later organism descends from the earlier cluster if one of its ancestors (or itself) was a member at tick ${fmt(A.c.tick)} (an organism can descend from several earlier clusters, so shares need not sum to 100%). The last column is the later cluster holding the most organisms with such an ancestor.${sampleNote}` : 'Descent is shown only when both checkpoints come from the same <code>.hxlg</code> family tree.'}</p>`;
+  }
+  onViews('runs', drawRuns);
+})();
 </script>
 </body>
 </html>

@@ -107,6 +107,48 @@ different founders. On the tick-35,400 run, every cluster at *t* = 4 is one fami
 back, while the giant cluster that forms around *t* = 33 reaches back about 35,000 ticks, which shows where genome
 distance stops tracking ancestry. A `genome-clusters.json` carries no lineage, so these columns don't appear for it.
 
+### Cluster analysis panel (in the explorer)
+
+Below the cluster genome, the explorer has a **Cluster analysis** panel with five tabs. They all follow the
+selected cluster, threshold and method. Only the visible tab is computed. The calculations live in one
+`<script id="cluster-analysis-core">` block (`GA`), which has no page dependencies, so the Node tests run the
+same code the page runs.
+
+Definitions are organism-weighted: an exact genome carried by k organisms counts k times.
+
+- **Presence distance** = conditions where exactly one genome has a rule. This is the existing coarse
+  distance. **Clustering still uses only this; nothing about clustering changed.**
+- **Output distance** (new) = conditions where both genomes have a rule but the outputs differ.
+- **Fine distance** = presence + output (same as `fineDistance` in `genome-clusters.js`).
+
+| Tab | What it measures |
+|---|---|
+| **Rule conservation** | For each of the 252 conditions: carriers (n, %), outputs among carriers (n, % per colour), output agreement (share giving the most common output), and level: absent / <50% / 50–75% / 75–<100% / 100%. Summary: rules in 100 / ≥75 / ≥50 / ≥25% of members, unanimous vs differing outputs, fully conserved (100% present *and* unanimous), presence agreement and output agreement (kept separate). There is a 3×84 heatmap (colour = majority output, strength = prevalence, corner notch = outputs differ) with a prevalence filter, hover and pin. It also has ranked conserved and most-disputed rule lists and a 252-row CSV download. |
+| **Compactness** | Size, distinct exact genomes, distinct rule patterns, genomes per organism, Simpson diversity, and pairwise presence / output / fine distances (mean, min, max). It also gives the distance to the representative and a chaining indicator (max pair vs *t*). Charts: a size vs mean-pairwise-distance scatter across clusters, a pairwise histogram, and a distance matrix. Clusters with more than 2,500 distinct genomes use a fixed sample and are labelled as sampled; a button computes them exactly. |
+| **Lineage vs genome** | (`.hxlg` only) Founders, the cluster's most recent common ancestor (age, generations), and the share of pairs with the same founder. It also counts parent–child and sibling pairs and the share of pairs sharing an ancestor within ≤ g generations. It gives Spearman correlations of presence distance with family-tree distance and with common-ancestor age, and how often an organism's nearest genome is also its nearest relative. Views: a presence × tree-distance grid, a distance matrix in family-tree order, and an on-demand compressed family tree (≤ 150 members). Two lists show genetically close but unrelated pairs and related but genetically distant pairs. Clusters over the sample cap (default 300) use a fixed-stride sample. |
+| **Compare clusters** | 2–6 clusters: a similarity matrix (prevalence similarity, Jaccard of ≥50% rules, representative distances) and a side-by-side metrics table. For a pair: shared / same-output / different / only-A / only-B rules at 100/75/50/25%, A and B heatmaps, an A − B difference heatmap, and the top distinguishing conditions (prevalence gap or output divergence). |
+| **Runs & ticks** | **Add file…** appends runs (`.json` or `.hxlg`). **Rebuild earlier ticks** reconstructs the population at any earlier tick from a `.hxlg`'s birth and death records. A table compares every loaded checkpoint, with overlaid merge curves and a prevalence distribution. A vs B rule comparison only runs when both use the same colours and condition list; colours are *not* relabelled. Cluster persistence between two ticks is matched both by rule structure and, within one `.hxlg`, by descent. |
+
+**Tick convention.** An export labelled *T* holds the population at the start of tick *T*: born before *T*,
+not dead before *T*. The tick-38,750 export rebuilds the tick-35,400 export exactly: 2,502 of 2,502
+organisms, same ids, same genomes. The page checks this on every `.hxlg` and disables rebuilding if the
+check fails. The 1,050 / 3,000 / 5,100 exports in Downloads are different simulations from the
+35,400 / 38,750 run, so they cannot be lined up by organism id.
+
+**Not supported by the data yet:**
+- Lineage needs a `.hxlg`. `genome-clusters.json` and the run directories' snapshots have no organism ids or
+  parent links. To support lineage, `genome-snapshots` would need an id per organism plus a
+  parent/founder/birth table.
+- Rebuilt ticks have no phase label (the `.hxlg` series is not split per tick).
+- Comparing different runs needs colour relabelling (`colours.js`) before rule-level matches mean anything
+  beyond literal ones.
+
+```
+node analysis/test-cluster-analysis.js        # 26 hand-checked unit checks of the GA core
+node analysis/verify-cluster-analysis.js --json analysis/runs/genome-clusters.json \
+     --hxlg <late.hxlg> [--early <earlier export of the same run>]   # real-data cross-checks
+```
+
 ### Genome clusters vs lineage, in batch
 
 ```
