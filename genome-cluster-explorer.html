@@ -137,11 +137,14 @@ tbody tr { cursor: pointer; }
       <p class="note" id="distNote"></p>
       <div class="tablewrap">
         <table>
-          <thead><tr><th>Cluster</th><th>Organisms</th><th>% of pop.</th><th>Rule patterns</th><th>Exact genomes</th><th>Rules in rep.</th><th>Mean dist. to rep.</th><th>Max dist. to rep.</th></tr></thead>
+          <thead id="head"></thead>
           <tbody id="rows"></tbody>
         </table>
       </div>
       <p class="note">Representative (rep.) = the cluster's most common rule pattern. "Max dist. to rep." above <em>t</em> means the cluster was joined by chaining.</p>
+      <p class="note" id="linNote" hidden>Lineage (from the <code>.hxlg</code> family tree): <b>Founders</b> = how many of the run's starting organisms the members descend from.
+        <b>Common ancestor</b> = how long before the export the members' most recent common ancestor was born; <b>Gens.</b> = the most generations from any member back to it.
+        A recent ancestor means the cluster is one mutant family; "none" means its members come from different founders.</p>
     </section>
 
     <section class="panel">
@@ -229,6 +232,36 @@ function clustersAt(t) {
   return out;
 }
 
+// ---------- lineage of a cluster (only for .hxlg input, which carries the family tree)
+// The cluster's most recent common ancestor (MRCA): walk each member up its parent chain until it meets the
+// first member's chain; the oldest meeting point is the MRCA. A member that never meets it descends from
+// another founder, so the cluster has no common ancestor. Cost: at most one chain walk per member.
+function clusterLineage(c) {
+  const L = cp.lineage;
+  if (!L) return null;
+  if (c.lin) return c.lin;
+  const ids = [];
+  for (const i of c.mem) for (const e of model.pats[i].exact) if (e[2]) ids.push(...e[2]);
+  if (!ids.length) return null;
+  const founders = new Set(ids.map(id => L.founder[id]));
+  if (founders.size > 1 || ids.length < 2) return c.lin = {founders: founders.size, ancestor: null, ageTicks: null, generations: 0};
+  const chain = [], pos = new Map();
+  for (let a = ids[0]; a >= 0; a = L.parent[a]) { pos.set(a, chain.length); chain.push(a); }
+  let deepest = 0;   // index in chain of the oldest meeting point found so far
+  const hits = [];
+  for (let k = 1; k < ids.length; k++) {
+    let a = ids[k], steps = 0;
+    while (a >= 0 && !pos.has(a)) { a = L.parent[a]; steps++; }
+    if (a < 0) return c.lin = {founders: founders.size, ancestor: null, ageTicks: null, generations: 0};   // log gap
+    const at = pos.get(a);
+    hits.push(steps - at);   // generations to the MRCA = steps + (deepest - at), finished below
+    if (at > deepest) deepest = at;
+  }
+  const generations = Math.max(deepest, ...hits.map(h => h + deepest));
+  const ancestor = chain[deepest];
+  return c.lin = {founders: 1, ancestor, ageTicks: L.tick - L.birth[ancestor], generations};
+}
+
 // ---------- .hxlg (lineage + genomes) → the same shape genome-clusters.js writes, one checkpoint
 // Reader for the "hex-ca-lineage-genomes-v1" file, same as OrganismLog.parse in organismlog.js. It lives
 // here so this page works on its own (opened from Downloads, an attachment, etc.) without organismlog.js.
@@ -261,17 +294,18 @@ function genomesFromHxlg(d) {
     if (id < 0 || id >= h.organisms) continue;   // not recorded (log disabled when it was born)
     d.genomeOf(id, g);
     let s = ''; for (let c = 0; c < h.ncond; c++) s += sym[g[c] + 1];
-    out.set(s, (out.get(s) || 0) + 1);
+    const e = out.get(s);
+    if (e) { e.count++; e.ids.push(id); } else out.set(s, {count: 1, ids: [id]});
   }
-  return [...out];
+  return [...out].map(([s, e]) => [s, e.count, e.ids]);   // [genome, count, organism ids]: ids feed the lineage columns
 }
 function groupPatterns(genomes) {
   const byKey = new Map();
-  for (const [g, count] of genomes) {
+  for (const [g, count, ids] of genomes) {
     const key = g.replace(/[^.]/g, '1').replace(/\./g, '0');
     let p = byKey.get(key);
     if (!p) byKey.set(key, p = {key, bits: presenceBits(g), count: 0, exact: []});
-    p.count += count; p.exact.push([g, count]);
+    p.count += count; p.exact.push(ids ? [g, count, ids] : [g, count]);
   }
   const pats = [...byKey.values()];
   for (const p of pats) p.exact.sort((a, b) => b[1] - a[1]);
@@ -337,7 +371,8 @@ function fromHxlg(buf, name) {
   const pats = groupPatterns(genomes), total = pats.reduce((s, p) => s + p.count, 0), edges = spanningTree(pats);
   const cp = {tick: h.exportedAtTick, final: true, phase: phaseFromSeries(h.series), survivors: total,
     uniqueGenomes: genomes.length, uniquePatterns: pats.length, nearestNeighbour: nearestHistogram(pats, edges),
-    mergeCurve: mergeCurve(pats, edges, total), mst: edges, patterns: pats.map(p => p.exact)};
+    mergeCurve: mergeCurve(pats, edges, total), mst: edges, patterns: pats.map(p => p.exact),
+    lineage: {parent: d.parent, founder: d.founder, birth: d.birth, tick: h.exportedAtTick}};   // in memory only; JSON input has none
   return {format: 'genome-clusters/1', runs: [{name, seed: h.params && h.params.seed, colours: h.n, conditions: h.conditions, checkpoints: [cp]}]};
 }
 
@@ -442,13 +477,24 @@ function drawDist() {
   const singletons = clusters.filter(c => c.organisms === 1).length;
   $('distNote').textContent = `${fmt(clusters.length)} clusters: the 12 largest are coloured, and the rest (${fmt(rest.length)}, ${pct(restShare)} of the population) are grey. ${fmt(singletons)} clusters hold a single organism.`;
 }
+function linCells(c) {
+  const l = clusterLineage(c);
+  if (!l) return '';
+  if (c.organisms === 1) return '<td>1</td><td class="note">—</td><td class="note">—</td>';
+  if (!l.ancestor && l.ancestor !== 0) return `<td>${fmt(l.founders)}</td><td class="note" title="Members descend from different founders">none</td><td class="note">—</td>`;
+  return `<td>1</td><td title="Ancestor #${l.ancestor}">${fmt(l.ageTicks)} ticks ago</td><td>${fmt(l.generations)}</td>`;
+}
 function drawTable() {
-  const t = +$('t').value;
+  const t = +$('t').value, lin = !!cp.lineage;
+  const cols = ['Cluster', 'Organisms', '% of pop.', 'Rule patterns', 'Exact genomes', 'Rules in rep.', 'Mean dist. to rep.', 'Max dist. to rep.']
+    .concat(lin ? ['Founders', 'Common ancestor', 'Gens.'] : []);
+  $('head').innerHTML = `<tr>${cols.map(h => `<th>${h}</th>`).join('')}</tr>`;
+  $('linNote').hidden = !lin;
   $('rows').innerHTML = clusters.slice(0, 200).map((c, i) => `<tr data-i="${i}" class="${i === selected ? 'sel' : ''}">
     <td><span class="sw" style="background:${clColour(i)}"></span>${i + 1}</td><td>${fmt(c.organisms)}</td><td>${pct(c.share)}</td>
     <td>${fmt(c.mem.length)}</td><td>${fmt(c.exact)}</td><td>${model.pats[c.rep].rules}</td><td>${c.spread.toFixed(1)}</td>
-    <td${c.far > t ? ' class="warn" title="Larger than t: members joined through chains"' : ''}>${c.far}</td></tr>`).join('') +
-    (clusters.length > 200 ? `<tr><td colspan="8" class="note">… ${fmt(clusters.length - 200)} more</td></tr>` : '');
+    <td${c.far > t ? ' class="warn" title="Larger than t: members joined through chains"' : ''}>${c.far}</td>${lin ? linCells(c) : ''}</tr>`).join('') +
+    (clusters.length > 200 ? `<tr><td colspan="${cols.length}" class="note">… ${fmt(clusters.length - 200)} more</td></tr>` : '');
   $('rows').querySelectorAll('tr[data-i]').forEach(r => r.onclick = () => { selected = +r.dataset.i; drawTable(); drawGenome(); });
 }
 
@@ -467,7 +513,14 @@ function drawGenome() {
   const repG = model.pats[c.rep].exact[0][0];
   $('gTitle').textContent = `Cluster ${selected + 1} genome`;
   $('gSub').textContent = `${fmt(c.organisms)} organisms (${pct(c.share)}), ${fmt(c.mem.length)} rule patterns, ${fmt(c.exact)} exact genomes. ` +
-    `Its most common genome has ${model.pats[c.rep].rules} rules; members average ${c.spread.toFixed(1)} rules away from it (furthest ${c.far}).`;
+    `Its most common genome has ${model.pats[c.rep].rules} rules; members average ${c.spread.toFixed(1)} rules away from it (furthest ${c.far}).` +
+    (() => {
+      const l = c.organisms > 1 && clusterLineage(c);
+      if (!l) return '';
+      return l.ancestor === null
+        ? ` Its members descend from ${fmt(l.founders)} different founders, so they share no common ancestor.`
+        : ` All members descend from one ancestor born ${fmt(l.ageTicks)} ticks before the export, at most ${fmt(l.generations)} generations back.`;
+    })();
   // rows by current-cell colour, in condition order
   const bySelf = Array.from({length: n}, () => []);
   run.conditions.forEach((cond, x) => bySelf[cond[0]].push(x));

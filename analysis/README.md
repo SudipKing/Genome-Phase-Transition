@@ -99,6 +99,14 @@ cluster. The genome view shows each of the 252 conditions as a cell, with opacit
 carrying the rule, colour = most common output, and an underline on rules in the representative genome. It
 also lists the rules most of the cluster carries.
 
+When the explorer opens a `.hxlg`, the cluster table gains three lineage columns from the file's family tree:
+**Founders** (how many starting organisms the members descend from), **Common ancestor** (how many ticks before
+the export the members' most recent common ancestor was born) and **Gens.** (the most generations from any member
+back to it). A recent ancestor means the cluster is one mutant family; "none" means its members come from
+different founders. On the tick-35,400 run, every cluster at *t* = 4 is one family with an ancestor 37–167 ticks
+back, while the giant cluster that forms around *t* = 33 reaches back about 35,000 ticks, which shows where genome
+distance stops tracking ancestry. A `genome-clusters.json` carries no lineage, so these columns don't appear for it.
+
 This differs from `clusters.js`, which samples 300 organisms per run, counts output colours, relabels colours
 across runs, and chooses k by silhouette.
 
