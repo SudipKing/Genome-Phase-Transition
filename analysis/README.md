@@ -99,6 +99,29 @@ cluster. The genome view shows each of the 252 conditions as a cell, with opacit
 carrying the rule, colour = most common output, and an underline on rules in the representative genome. It
 also lists the rules most of the cluster carries.
 
+When the explorer opens a `.hxlg`, the cluster table gains three lineage columns from the file's family tree:
+**Founders** (how many starting organisms the members descend from), **Common ancestor** (how many ticks before
+the export the members' most recent common ancestor was born) and **Gens.** (the most generations from any member
+back to it). A recent ancestor means the cluster is one mutant family; "none" means its members come from
+different founders. On the tick-35,400 run, every cluster at *t* = 4 is one family with an ancestor 37–167 ticks
+back, while the giant cluster that forms around *t* = 33 reaches back about 35,000 ticks, which shows where genome
+distance stops tracking ancestry. A `genome-clusters.json` carries no lineage, so these columns don't appear for it.
+
+### Genome clusters vs lineage, in batch
+
+```
+node analysis/cluster-lineage.js <file.hxlg> > cluster-lineage.json
+```
+
+`cluster-lineage.js` runs the same comparison on a `.hxlg` export and writes JSON, with a three-line summary
+on stderr. It reports nearest-neighbour distances and the age of each organism's common ancestor with its
+nearest genome, compared with random pairs. It also reports the median ancestor age at each genome distance
+(how far distance tracks ancestry), the output-colour differences the coarse distance hides, the merge
+curve, and the clusters at `--t` (default 4) with founders and common ancestor. It covers the largest
+cluster's ancestry as *t* rises, and the top representative clusters at *t* = 4 to 24. Distances, cluster order and
+representative clusters match the explorer, so cluster numbers line up with its table. Random samples use
+`--seed` (default 1), so reruns give the same numbers. It takes about 15 s on the tick-35,400 run.
+
 This differs from `clusters.js`, which samples 300 organisms per run, counts output colours, relabels colours
 across runs, and chooses k by silhouette.
 
