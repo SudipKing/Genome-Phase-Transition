@@ -107,6 +107,21 @@ different founders. On the tick-35,400 run, every cluster at *t* = 4 is one fami
 back, while the giant cluster that forms around *t* = 33 reaches back about 35,000 ticks, which shows where genome
 distance stops tracking ancestry. A `genome-clusters.json` carries no lineage, so these columns don't appear for it.
 
+### Genome clusters vs lineage, in batch
+
+```
+node analysis/cluster-lineage.js <file.hxlg> > cluster-lineage.json
+```
+
+`cluster-lineage.js` runs the same comparison on a `.hxlg` export and writes JSON, with a three-line summary
+on stderr. It reports nearest-neighbour distances and the age of each organism's common ancestor with its
+nearest genome, compared with random pairs. It also reports the median ancestor age at each genome distance
+(how far distance tracks ancestry), the output-colour differences the coarse distance hides, the merge
+curve, and the clusters at `--t` (default 4) with founders and common ancestor. It covers the largest
+cluster's ancestry as *t* rises, and the top representative clusters at *t* = 4 to 24. Distances, cluster order and
+representative clusters match the explorer, so cluster numbers line up with its table. Random samples use
+`--seed` (default 1), so reruns give the same numbers. It takes about 15 s on the tick-35,400 run.
+
 This differs from `clusters.js`, which samples 300 organisms per run, counts output colours, relabels colours
 across runs, and chooses k by silhouette.
 
